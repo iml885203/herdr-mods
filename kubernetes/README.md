@@ -30,7 +30,7 @@ Copy `mods/kubernetes` into `~/.config/herdr-app/mods/` (keep the folder name `k
 { "global": { "cmd-k": "mod.open:kubernetes" } }
 ```
 
-Then run `herdr-app check mods/kubernetes`. Or tell your Herdr agent to add `herdr.dev/mods/iml885203/kubernetes`.
+Then run `herdr-app check mods/kubernetes`. Or tell your Herdr agent to add `herdr.dev/mods/iml885203/herdr-mods--kubernetes`.
 
 ## Keys
 

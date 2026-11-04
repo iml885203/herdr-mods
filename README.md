@@ -11,7 +11,7 @@ Add-ons for the [Herdr](https://herdr.dev) desktop app.
 
 Ask the agent in your Herdr app:
 
-> Add herdr.dev/mods/iml885203/kubernetes
+> Add herdr.dev/mods/iml885203/herdr-mods--kubernetes
 
 That's it. To install by hand, see the mod's own README.
 
