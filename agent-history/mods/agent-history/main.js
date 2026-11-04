@@ -176,7 +176,9 @@ export default class SessionHistory extends View {
     if (!s?.argv?.length) return;
     const folder = s.cwd || home();
     const name = s.title || s.folder || s.agent;
-    const existing = spaces().find((sp) => !sp.machine && norm(sp.folder) === norm(folder));
+    // Several spaces can share a folder: the one you are in wins, else the first that matches.
+    const matches = spaces().filter((sp) => !sp.machine && norm(sp.folder) === norm(folder));
+    const existing = matches.find((sp) => sp.active) ?? matches[0];
     if (existing) {
       run("tab.new", { name, space: existing.id, folder, argv: s.argv });
       if (!existing.active) run("space.select", { id: existing.id });

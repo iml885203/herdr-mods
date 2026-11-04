@@ -8,7 +8,7 @@ Full-text search over your Claude Code, Codex and Pi sessions, in the [Herdr](ht
 
 - Searches titles, your prompts, the agent's replies and tool input/output, including CJK text.
 - Results are newest first, each with the folder, age and a snippet with the match highlighted.
-- Resume opens a tab in the space whose folder matches the session, or a new space if there is none.
+- Resume opens a tab in the space whose folder matches the session (the current space when several match), or a new space if there is none.
 - `All` or `This space` scope; copy the resume command; reveal the transcript file; delete it (two steps).
 - The index updates itself while the popup is open.
 
