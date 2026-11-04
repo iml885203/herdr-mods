@@ -9,14 +9,14 @@ Writes a `/goal` line for the Claude Code session in your focused terminal, in t
 - Reads the focused terminal's Claude Code session and its recent conversation, and asks Claude to write one short goal for what to do next.
 - Keeps up to 20 goals per session, newest first, so reopening shows the earlier ones instead of calling the model again.
 - `Enter` pastes `/goal <text>` into the terminal without pressing Enter; `cmd-c` copies it; `cmd-r` writes a new one.
-- Writes in the language you use in the conversation.
+- Writes in the language set in Claude Code's `language` setting (`~/.claude/settings.json`), or, without one, in the language you use in the conversation.
 
 ## Requirements
 
 - Herdr desktop app on macOS or Linux
 - Claude Code (`claude` on your `PATH`) with the `/goal` command, running in the focused terminal
 - `jq`, `perl`, `find`, `mktemp` and the `hc` command that ships with Herdr
-- Optional: `JetBrainsMono Nerd Font` for the icons; set `GOAL_MODEL` to change the model (default `sonnet`)
+- Optional: `JetBrainsMono Nerd Font` for the icons; set `GOAL_MODEL` to change the model (default `sonnet`); set Claude Code's `language` setting to fix the goal's language (for example `"language": "繁體中文"`)
 
 ## Install
 

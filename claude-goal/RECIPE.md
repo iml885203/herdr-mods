@@ -25,7 +25,7 @@ Icons are drawn with `JetBrainsMono Nerd Font` when `fonts()` lists it, otherwis
 - **Spinner.** Eight frames from `U+F0A9E` (one slice at a time), advanced every 110 ms only while loading or generating.
 - **Keys.** `Esc` closes. `cmd-r` generates (ignored with no session or while generating). With a selection: `Enter` uses the goal, `cmd-c` copies it and closes, `Up`/`Down` move (clamped). Clicking an unselected row selects it; clicking the selected row uses it.
 - **Use (`Enter`).** Writes the goal to the clipboard, closes the popup, runs `pane.focus` with `{ terminal }`, then `terminal.paste`. The text lands in the Claude Code prompt without Enter, so you read it and press Enter yourself. The clipboard keeps the goal afterwards, because no Herdr command types text without submitting it.
-- **`goal.sh`.** Finds `$HOME/.claude/projects/*/<sid>.jsonl` (depth 2). Keeps the last 4000 lines, selects user and assistant entries that are not `isMeta` or `isSidechain`, keeps their text (a string, or text blocks joined by newlines), removes `<system-reminder>` blocks and `command-*` / `local-command-*` tag blocks with `perl`, and keeps the last 14000 bytes. It builds a prompt asking for one line of about 20 words, written in the user's language, finished state plus the single most important done-condition, not starting with `report`, `reply`, `explain`, `ask` or `confirm whether`, no markdown, no final period, output only `<goal>…</goal>`. It runs, in a temporary folder, `claude -p --model "${GOAL_MODEL:-sonnet}" --system-prompt <fixed text> --tools "" --no-session-persistence --disable-slash-commands --strict-mcp-config --setting-sources ""` with the prompt on stdin, and prints the text inside `<goal>` on one line. Exit codes: 2 no transcript, 3 empty conversation, 4 no `<goal>` in the reply.
+- **`goal.sh`.** Finds `$HOME/.claude/projects/*/<sid>.jsonl` (depth 2). Keeps the last 4000 lines, selects user and assistant entries that are not `isMeta` or `isSidechain`, keeps their text (a string, or text blocks joined by newlines), removes `<system-reminder>` blocks and `command-*` / `local-command-*` tag blocks with `perl`, and keeps the last 14000 bytes. It builds a prompt asking for one line of about 20 words, written in the language from `jq -r '.language // empty' ~/.claude/settings.json` (Claude Code's `language` setting) or, when that is empty or unreadable, in the language the user writes in, finished state plus the single most important done-condition, not starting with `report`, `reply`, `explain`, `ask` or `confirm whether`, no markdown, no final period, output only `<goal>…</goal>`. It runs, in a temporary folder, `claude -p --model "${GOAL_MODEL:-sonnet}" --system-prompt <fixed text> --tools "" --no-session-persistence --disable-slash-commands --strict-mcp-config --setting-sources ""` with the prompt on stdin, and prints the text inside `<goal>` on one line. Exit codes: 2 no transcript, 3 empty conversation, 4 no `<goal>` in the reply.
 
 ## Built from
 
@@ -35,6 +35,7 @@ Icons are drawn with `JetBrainsMono Nerd Font` when `fonts()` lists it, otherwis
 - Commands: `pane.focus {terminal}`, `terminal.paste`. Clipboard through `cx.write_to_clipboard`. Timers: `cx.timer.after(50)` to focus the popup, `cx.timer.every(110)` for the spinner, both cancelled in `close()`.
 - Programs: `hc get`, `sh`, `mkdir -p`; in `goal.sh`: `find`, `mktemp`, `tail`, `jq`, `perl`, `tr`, `grep`, `claude`.
 - Environment: `GOAL_MODEL` (default `sonnet`).
+- Claude Code setting: `language` in `~/.claude/settings.json`, read by `goal.sh` to pick the goal's language.
 - No art; icons are font glyphs.
 
 ## Watch out
@@ -57,3 +58,4 @@ Icons are drawn with `JetBrainsMono Nerd Font` when `fonts()` lists it, otherwis
 - `Enter` closes the popup and the Claude Code prompt contains `/goal …` that has not been sent.
 - `cmd-c` closes the popup and the clipboard holds the goal.
 - `sh mods/claude-goal/goal.sh <sessionId>` run by hand prints one line, and `GOAL_MODEL` changes the model used.
+- With `"language": "繁體中文"` in `~/.claude/settings.json`, a session dictated in Simplified Chinese or written in English still gets a Traditional Chinese goal; without the setting, the goal follows the conversation.
