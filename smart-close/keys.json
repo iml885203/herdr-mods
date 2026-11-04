@@ -1,0 +1,5 @@
+{
+  "global": {
+    "cmd-w": "mod.open:smart-close"
+  }
+}

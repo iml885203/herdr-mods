@@ -1,0 +1,1 @@
+{ "place": "none", "title": "Agent History", "overlay": { "kind": "popup", "at": "top", "offset": 40, "width": 800, "height": 0.8 } }

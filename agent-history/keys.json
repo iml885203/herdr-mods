@@ -1,0 +1,5 @@
+{
+  "global": {
+    "cmd-y": "mod.open:agent-history"
+  }
+}
