@@ -1,0 +1,5 @@
+{
+  "global": {
+    "cmd-k": "mod.open:kubernetes"
+  }
+}
