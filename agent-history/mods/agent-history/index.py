@@ -43,6 +43,12 @@ def connect():
     db = sqlite3.connect(DB_PATH, timeout=30)
     db.execute("PRAGMA journal_mode=WAL")
     db.executescript(SCHEMA)
+    cols = {r[1] for r in db.execute("PRAGMA table_info(files)")}
+    if "custom_title" not in cols:
+        # /rename titles came later: add the column and rebuild, older rows never read them.
+        db.execute("ALTER TABLE files ADD COLUMN custom_title TEXT")
+        db.execute("DELETE FROM fts"); db.execute("DELETE FROM msgs"); db.execute("DELETE FROM files")
+        db.commit()
     return db
 
 
@@ -106,7 +112,7 @@ def is_injected(text):
 
 class Meta:
     def __init__(self, row=None):
-        self.sid, self.cwd, self.title, self.preview = row or (None, None, None, None)
+        self.sid, self.cwd, self.title, self.preview, self.custom = row or (None, None, None, None, None)
 
 
 def parse_claude(o, meta):
@@ -115,6 +121,9 @@ def parse_claude(o, meta):
     if o.get("cwd") and not meta.cwd:
         meta.cwd = o["cwd"]
     t = o.get("type")
+    if t == "custom-title" and o.get("customTitle"):  # /rename; the latest one wins
+        meta.custom = o["customTitle"]
+        return None
     if t == "ai-title" and o.get("aiTitle"):
         meta.title = o["aiTitle"]
         return None
@@ -187,7 +196,7 @@ def parse_pi(o, meta):
 PARSERS = {"claude": parse_claude, "codex": parse_codex, "pi": parse_pi}
 # Cheap byte filters: skip lines that can't carry anything we index.
 WANTED = {
-    "claude": (b'"type":"user"', b'"type":"assistant"', b'"ai-title"'),
+    "claude": (b'"type":"user"', b'"type":"assistant"', b'"ai-title"', b'"custom-title"'),
     "codex": (b'"response_item"', b'"session_meta"'),
     "pi": (b'"type":"message"', b'"type":"session"'),
 }
@@ -197,7 +206,7 @@ def index_file(db, agent, path, st, row):
     """Index path from its last offset (transcripts are append-only)."""
     if row and st.st_size >= row[2] and row[2] > 0:
         file_id, offset = row[0], row[3]
-        meta = Meta(db.execute("SELECT sid,cwd,title,preview FROM files WHERE id=?", (file_id,)).fetchone())
+        meta = Meta(db.execute("SELECT sid,cwd,title,preview,custom_title FROM files WHERE id=?", (file_id,)).fetchone())
     else:
         if row:
             drop(db, row[0])
@@ -229,8 +238,8 @@ def index_file(db, agent, path, st, row):
             (path, agent, st.st_mtime, st.st_size, offset))
         file_id = cur.lastrowid
     db.execute(
-        "UPDATE files SET sid=?,cwd=?,title=?,preview=?,mtime=?,size=?,offset=? WHERE id=?",
-        (meta.sid, meta.cwd, meta.title, meta.preview, st.st_mtime, st.st_size, offset, file_id))
+        "UPDATE files SET sid=?,cwd=?,title=?,preview=?,custom_title=?,mtime=?,size=?,offset=? WHERE id=?",
+        (meta.sid, meta.cwd, meta.title, meta.preview, meta.custom, st.st_mtime, st.st_size, offset, file_id))
     for u, a, t in rows:
         mid = db.execute("INSERT INTO msgs(file_id) VALUES(?)", (file_id,)).lastrowid
         db.execute("INSERT INTO fts(rowid,user_text,assistant_text,tool_text,meta) VALUES(?,?,?,?,'')", (mid, u, a, t))
@@ -239,7 +248,7 @@ def index_file(db, agent, path, st, row):
     if old:
         db.execute("DELETE FROM fts WHERE rowid=?", (old[0],))
         db.execute("DELETE FROM msgs WHERE id=?", (old[0],))
-    label = " ".join(x for x in (meta.title, meta.cwd, meta.sid) if x)
+    label = " ".join(x for x in (meta.custom, meta.title, meta.cwd, meta.sid) if x)
     if label:
         mid = db.execute("INSERT INTO msgs(file_id) VALUES(?)", (file_id,)).lastrowid
         db.execute("INSERT INTO fts(rowid,user_text,assistant_text,tool_text,meta) VALUES(?,'','','',?)", (mid, label))
@@ -324,11 +333,12 @@ def result(agent, path, sid, cwd, title, preview, mtime, size, snip=""):
     }
 
 
-COLS = "id,path,agent,sid,cwd,title,preview,mtime,size"
+# A /rename title wins over the generated one, as in `claude --resume`.
+COLS = "id,path,agent,sid,cwd,COALESCE(custom_title,title),preview,mtime,size"
 
 
 def recent(db, limit):
-    rows = db.execute(f"SELECT {COLS} FROM files WHERE sid IS NOT NULL AND (preview IS NOT NULL OR title IS NOT NULL) ORDER BY mtime DESC LIMIT ?", (limit,))
+    rows = db.execute(f"SELECT {COLS} FROM files WHERE sid IS NOT NULL AND (preview IS NOT NULL OR title IS NOT NULL OR custom_title IS NOT NULL) ORDER BY mtime DESC LIMIT ?", (limit,))
     return {"ok": True, "results": [result(a, p, s, c, t, pv, m, z) for _i, p, a, s, c, t, pv, m, z in rows]}
 
 
