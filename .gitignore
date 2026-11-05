@@ -2,3 +2,4 @@
 */mods/*/jsconfig.json
 .DS_Store
 scripts/.private-words
+__pycache__/
