@@ -3,9 +3,9 @@
 // rename popup that F2 opens, which renames the tab and types `/rename` into its Claude.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, run, hc, exec, home, props, closeOverlay, notify, theme, watchFolder } from "herdr";
+import { spaces, panes, focused, run, hc, exec, home, appHome, props, closeOverlay, notify, theme, watchFolder } from "herdr";
 import * as fs from "fs/promises";
-import { APP, readSession, cleanName, claudeOf, renames, decide, probeResult, settled, PROBE_KEY } from "./logic.js";
+import { APP, readSession, cleanName, claudeOf, renames, decide, probeResult, settled, PROBE_KEY, kebabName, parseCache, cacheGet, cachePut } from "./logic.js";
 
 const MOD = "claude-tab-name";
 const TICK_MS = 15000; // a fallback: the folder watch below brings changes at once
@@ -19,6 +19,43 @@ const localTabs = () => {
   for (const s of spaces()) if (!s.machine) for (const t of s.tabs) tabs.set(t.id, t);
   return tabs;
 };
+
+// Claude's pid in a terminal: its foreground program.
+async function pidOf(terminal) {
+  const r = await hc(["get", terminal]);
+  if (r.code !== 0) return null;
+  try { return JSON.parse(r.stdout).foreground?.pid ?? null; } catch { return null; }
+}
+
+// A name for what the Claude in `terminal` is working on (name.sh asks Claude for one). Kept
+// per session in a file (5 minutes; a failure 1 minute), so opening the popup again doesn't
+// ask again: each popup is a fresh copy of this mod, so memory doesn't last.
+const CACHE_DIR = () => `${appHome()}/data/${MOD}`;
+const CACHE = () => `${CACHE_DIR()}/suggested.json`;
+async function readCache() {
+  try { return parseCache(await fs.readFile(CACHE(), "utf8")); } catch { return {}; }
+}
+async function writeCache(sid, name) {
+  try {
+    const all = cachePut(await readCache(), sid, name, Date.now());
+    await fs.mkdir(CACHE_DIR(), { recursive: true });
+    await fs.writeFile(CACHE(), JSON.stringify(all));
+  } catch (e) { console.log(`${MOD}: ${e?.message ?? e}`); }
+}
+async function suggestName(terminal) {
+  const pid = await pidOf(terminal);
+  if (pid === null) return null;
+  let sid = null;
+  try { sid = JSON.parse(await fs.readFile(`${SESSIONS()}/${pid}.json`, "utf8")).sessionId ?? null; } catch {}
+  if (typeof sid !== "string" || !/^[0-9A-Za-z][0-9A-Za-z-]{7,63}$/.test(sid)) return null; // it goes into a find -name pattern
+  const cached = cacheGet(await readCache(), sid, Date.now());
+  if (cached.hit) return cached.name;
+  const r = await exec("sh", [`${appHome()}/mods/${MOD}/name.sh`, sid]);
+  if (r.code !== 0) console.log(`${MOD}: name.sh exited ${r.code}: ${(r.stderr || r.stdout).trim().slice(0, 200)}`);
+  const name = r.code === 0 ? kebabName(r.stdout) : null;
+  await writeCache(sid, name);
+  return name;
+}
 
 const screen = async (terminal) => {
   const r = await hc(["read", terminal]);
@@ -150,9 +187,7 @@ export default class ClaudeTabName extends View {
   }
 
   async pidOf(terminal) {
-    const r = await hc(["get", terminal]);
-    if (r.code !== 0) return null;
-    try { return JSON.parse(r.stdout).foreground?.pid ?? null; } catch { return null; }
+    return pidOf(terminal);
   }
 
   // ---- rename popup (F2) ----
@@ -170,6 +205,31 @@ export default class ClaudeTabName extends View {
     this.input.on("submit", (_e, cx) => this.apply(cx));
     this.input.focus();
     this.tasks.push(cx.timer.after(300, () => this.input.focus()));
+    // A name for what its Claude is working on, offered as a chip: Tab or a click puts it in
+    // the field (never by itself, so Enter on an empty field still puts the tab back to its
+    // number). It starts a moment after the popup opens: a quick Esc costs nothing.
+    this.suggestion = null;
+    this.used = false; // the suggestion was put in the field
+    this.suggesting = !!this.claude;
+    if (this.claude) {
+      const term = this.claude.terminal;
+      this.tasks.push(cx.timer.after(400, (cx) => cx.spawn(async (cx) => {
+        let name = null;
+        try { name = await suggestName(term); } catch (e) { console.log(`${MOD}: ${e?.message ?? e}`); }
+        if (this.closed) return;
+        this.suggesting = false;
+        this.suggestion = name;
+        cx.notify();
+      })));
+    }
+  }
+
+  useSuggestion() {
+    if (!this.suggestion || this.applying) return false;
+    this.input.set_value(this.suggestion);
+    this.input.focus();
+    this.used = true;
+    return true;
   }
 
   dismiss() {
@@ -210,6 +270,7 @@ export default class ClaudeTabName extends View {
       .bg(t.popover)
       .text_size(13)
       .on_key_down((e, cx) => {
+        if (e.keystroke === "tab" || e.keystroke === "shift-tab") { this.useSuggestion(); cx.stop_propagation(); cx.notify(); return; } // Tab never leaves the field
         if (e.keystroke !== "escape") return;
         cx.stop_propagation();
         if (!this.applying) this.dismiss(); // mid-rename it finishes on its own, in a second
@@ -217,6 +278,17 @@ export default class ClaudeTabName extends View {
       .child(div().text_size(14).font_semibold().text_color(t.foreground).child("Rename tab"))
       .child(h_flex().h(34).flex_none().px(10).items_center().rounded(8).border_1().border_color(t.accent).bg(t.background)
         .child(Input.new(this.input).flex_1().h_full().text_size(13).text_color(t.foreground)))
+      .child(h_flex().h(22).gap(8).items_center().text_size(11.5).text_color(t.dim)
+        .child(div().flex_none().child("Suggested"))
+        .when(this.suggesting, (el) => el.child(div().italic().child("thinking…")))
+        .when(!this.suggesting && !this.suggestion, (el) => el.child(div().child(this.claude ? "none" : "only for a Claude tab")))
+        .when(!!this.suggestion && this.suggestion === this.tab?.name, (el) => el.child(div().child(`${this.suggestion} (the tab's name already)`)))
+        .when(!!this.suggestion && this.suggestion !== this.tab?.name, (el) => el.child(h_flex().id("suggestion").h(22).px(8).gap(6).items_center().rounded(6).cursor_pointer()
+          .bg(t.selected).text_color(t.foreground).hover((s) => s.bg(t.hover))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { this.useSuggestion(); cx.notify(); })
+          .child(div().child(this.suggestion ?? ""))
+          .child(div().text_color(t.dim).child(this.used ? "in the field" : "tab")))))
       .child(h_flex().gap(12).text_size(11.5).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(note))
         .child(div().flex_none().child("↵ rename   esc cancel")));

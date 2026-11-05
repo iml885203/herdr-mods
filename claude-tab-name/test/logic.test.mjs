@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readSession, cleanName, claudeOf, renames, promptBox, decide, probeResult, settled, PROBE_KEY } from "../mods/claude-tab-name/logic.js";
+import { readSession, cleanName, claudeOf, renames, promptBox, decide, probeResult, settled, PROBE_KEY, kebabName, parseCache, cacheGet, cachePut, SUGGEST_TTL_MS, FAIL_TTL_MS } from "../mods/claude-tab-name/logic.js";
 
 const session = (o) => JSON.stringify({ pid: 101, name: "tech review", nameSource: "user", nameSince: 5, ...o });
 
@@ -129,4 +129,45 @@ test("after the backspace: back as before, or empty, is settled", () => {
   assert.equal(settled(scr("❯ /rename nine"), scr("❯ ")), true);
   assert.equal(settled(scr("❯ /rename nine"), scr(`❯ ${PROBE_KEY}`)), false); // the key is still there
   assert.equal(settled(scr("❯ /rename nine"), null), false);
+});
+
+test("a suggested name is aaa-bbb: lowercase ASCII words, 4 at most", () => {
+  assert.equal(kebabName("tab-rename-suggest"), "tab-rename-suggest");
+  assert.equal(kebabName("  Fix Login_Retry!\n"), "fix-login-retry");
+  assert.equal(kebabName("k8s log search filter bug fix"), "k8s-log-search-filter"); // cut to 4 words
+  assert.equal(kebabName("修 bug"), "bug");
+  assert.equal(kebabName("—"), null);
+  assert.equal(kebabName(null), null);
+  assert.equal(kebabName("a".repeat(30) + " " + "b".repeat(30)), "a".repeat(30)); // 40 characters at most
+  assert.equal(kebabName("x".repeat(50)), null);
+  assert.equal(kebabName("x".repeat(40)), "x".repeat(40));
+  assert.equal(kebabName("aaaaaaaaaa bbbbbbbbbb cccccccccc dddddddddd"), "aaaaaaaaaa-bbbbbbbbbb-cccccccccc"); // 4 words over 40: drop from the end
+  assert.equal(kebabName("fixLoginRetry"), "fix-login-retry");
+  assert.equal(kebabName("café menu"), "cafe-menu");
+  assert.equal(kebabName("2026"), "2026");
+  assert.equal(kebabName("Sorry, I cannot name this"), null);
+  assert.equal(kebabName("cannot-find-module"), "cannot-find-module"); // a name, not a refusal
+});
+
+test("the suggestion cache: names for 5 minutes, failures for 1", () => {
+  const t0 = 1_000_000;
+  let all = cachePut({}, "s1", "fix-login", t0);
+  all = cachePut(all, "s2", null, t0);
+  assert.deepEqual(cacheGet(all, "s1", t0 + SUGGEST_TTL_MS - 1), { hit: true, name: "fix-login" });
+  assert.deepEqual(cacheGet(all, "s1", t0 + SUGGEST_TTL_MS), { hit: false });
+  assert.deepEqual(cacheGet(all, "s2", t0 + FAIL_TTL_MS - 1), { hit: true, name: null });
+  assert.deepEqual(cacheGet(all, "s2", t0 + FAIL_TTL_MS), { hit: false });
+  assert.deepEqual(cacheGet(all, "nope", t0), { hit: false });
+  // Writing drops what has expired.
+  assert.deepEqual(Object.keys(cachePut(all, "s3", "x-y", t0 + FAIL_TTL_MS)).sort(), ["s1", "s3"]);
+});
+
+test("a damaged cache reads as empty, and odd entries are ignored", () => {
+  assert.deepEqual(parseCache("{half"), {});
+  assert.deepEqual(parseCache("[1,2]"), {});
+  assert.deepEqual(parseCache("null"), {});
+  const all = parseCache(JSON.stringify({ a: { name: "Not Kebab", at: 5 }, b: { name: "ok-name" }, c: "x" }));
+  assert.deepEqual(cacheGet(all, "a", 6), { hit: false });
+  assert.deepEqual(cacheGet(all, "b", 6), { hit: false });
+  assert.deepEqual(cacheGet(all, "c", 6), { hit: false });
 });

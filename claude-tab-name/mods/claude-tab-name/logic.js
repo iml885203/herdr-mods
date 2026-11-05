@@ -108,3 +108,45 @@ export function settled(before, now) {
   const b = promptBox(now);
   return !!a && !!b && (b.text === a.text || b.text === "");
 }
+
+// A suggested tab name, as `aaa-bbb`: lowercase ASCII words joined by hyphens, at most 4 words
+// and 40 characters (camelCase splits into words, accents drop where the runtime has
+// String.normalize). null when nothing usable is left, or when the model wrote a sentence of
+// refusal instead of a name ("sorry", "cannot", "unable" in text with spaces; a name like
+// cannot-find-module is fine).
+export const MAX_SUGGESTED_WORDS = 4;
+const REFUSAL = /\b(sorry|cannot|unable)\b/i;
+export function kebabName(text) {
+  let str = String(text ?? "");
+  if (/\s/.test(str.trim()) && REFUSAL.test(str)) return null;
+  if (typeof str.normalize === "function") str = str.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  str = str.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  const words = str.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean).slice(0, MAX_SUGGESTED_WORDS);
+  let name = words.join("-");
+  while (name.length > 40 && words.length > 1) { words.pop(); name = words.join("-"); }
+  return name && name.length <= 40 ? name : null;
+}
+
+// The suggestion cache file: {sessionId: {name, at}}. A name of null records a failure, kept
+// for a shorter time so a session that never gets a name isn't asked on every F2.
+export const SUGGEST_TTL_MS = 5 * 60 * 1000;
+export const FAIL_TTL_MS = 60 * 1000;
+export function parseCache(text) {
+  let all;
+  try { all = JSON.parse(text); } catch { return {}; }
+  return all && typeof all === "object" && !Array.isArray(all) ? all : {};
+}
+const ttlOf = (e) => (e?.name === null ? FAIL_TTL_MS : SUGGEST_TTL_MS);
+const live = (e, now) => !!e && typeof e.at === "number" && now - e.at < ttlOf(e) && (e.name === null || kebabName(e.name) === e.name);
+// What the cache knows: {hit: false}, or {hit: true, name} (name null: it failed lately).
+export function cacheGet(all, sid, now) {
+  const e = all[sid];
+  return live(e, now) ? { hit: true, name: e.name } : { hit: false };
+}
+// The cache with this session's result, and without entries past their time.
+export function cachePut(all, sid, name, now) {
+  const out = {};
+  for (const [k, v] of Object.entries(all)) if (live(v, now)) out[k] = v;
+  out[sid] = { name: name ?? null, at: now };
+  return out;
+}
