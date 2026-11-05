@@ -1202,7 +1202,7 @@ export default class K8s extends View {
           rows.slice(range.start, range.end).map((r, j) => {
             const i = range.start + j, sel = i === this.at;
             return h_flex().h(24).px(12).items_center().when(sel, (el) => el.bg(t.selected)).when(!sel && i % 2, (el) => el.bg(t.surface))
-              .child(cell(18, "●", tone[r.tone] ?? t.dim))
+              .child(cell(18, glyph(null, ICONS.live).text_size(8), tone[r.tone] ?? t.dim))
               .child(cell(96, r.ctx, ctxColor(r.ctx)))
               .when(!kind.cluster, (el) => el.child(cell(150, r.ns, t.muted)))
               .child(div().flex_1().min_w(180).pr(10).truncate().text_color(t.foreground).when(sel, (el) => el.font_semibold()).child(r.name))

@@ -401,7 +401,7 @@ export default class SessionHistory extends View {
           .child(Scrollbar.vertical("sh-rows").absolute().inset_0())))
       .when(Boolean(sel), (el) => el.child(h_flex().flex_none().gap(6).items_center().pt(2)
         .child(div().flex_1().min_w(0).truncate().text_size(10.5).text_color(t.dim).child(sel.cwd || "(no folder recorded)"))
-        .child(this.button(t, "sh-resume", "Resume ⏎", () => this.resume(sel), { primary: true }))
+        .child(this.button(t, "sh-resume", "Resume ↵", () => this.resume(sel), { primary: true }))
         .child(this.button(t, "sh-copy", "Copy cmd", () => this.copyCmd(sel)))
         .child(this.button(t, "sh-reveal", isMac() ? "Finder" : "Folder", () => this.reveal(sel)))
         .when(this.confirmDelete === sel.path, (el) => el

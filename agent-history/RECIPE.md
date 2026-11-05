@@ -14,7 +14,7 @@ A popup (`mod.json`: `place: "none"`, title `Agent History`, overlay kind `popup
    - First line: an agent badge (48px by 16px, 4px radius, 9.5px bold, the agent name in capitals on a 13% tint of its color: Claude `#D97757`, Codex `#6E8BFF`, any other agent such as Pi the theme `working` color), the title (12.5px, truncated; falls back to the first prompt, then the session id), the folder name (10.5px, dim), and the age (30px wide, dim: `now`, `Nm`, `Nh`, `Nd`, `Nmo`).
    - Second line, indented 56px, 11px muted: with a query, the snippet; with no query, the first prompt when the session has a title. The matched text is drawn on an accent tint (`accent` + `33`), in `foreground`, semibold. A snippet keeps at most 48 characters before the match, with a leading `…`.
    - Empty states: `No session mentions that.`, `No sessions in this space's folders.`, `No sessions yet.`
-4. **Action row**, only when a row is selected: the session's folder (10.5px, dim, truncated; `(no folder recorded)` if none), then buttons 26px high, 11px text: `Resume ⏎` (accent fill), `Copy cmd`, `Finder` (macOS) or `Folder` (elsewhere), `Delete` (bordered). After the first press `Delete` is replaced by `Delete?` (filled `blocked`) and `Keep`.
+4. **Action row**, only when a row is selected: the session's folder (10.5px, dim, truncated; `(no folder recorded)` if none), then buttons 26px high, 11px text: `Resume ↵` (accent fill), `Copy cmd`, `Finder` (macOS) or `Folder` (elsewhere), `Delete` (bordered). After the first press `Delete` is replaced by `Delete?` (filled `blocked`) and `Keep`.
 
 ## How it behaves
 
