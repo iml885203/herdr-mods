@@ -35,6 +35,9 @@ done
 # Mods run in QuickJS, not Node: tests pass under Node even when the runtime would throw.
 if rg -n -e '\bBuffer\.[a-zA-Z]' -e '\brequire\(' -e '\bprocess\.(env|argv|exit|cwd|platform|stdout|stderr)' -e 'from "node:' -e '__dirname' -e '\bsetTimeout\(' -e '\bsetInterval\(' --glob '*/mods/**/*.js' . ; then bad "Node-only API in mod code"; else note "ok   no Node-only APIs in mods"; fi
 
+# A method defined twice in one class: the later one silently replaces the first.
+if node scripts/dup-methods.mjs */mods/*/*.js; then note "ok   no duplicate class methods"; else bad "duplicate class methods"; fi
+
 # Nothing private goes public. The word list stays local (scripts/.private-words, gitignored,
 # one regex per line) so the list itself is never published.
 words="scripts/.private-words"

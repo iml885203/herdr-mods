@@ -416,11 +416,11 @@ export default class K8s extends View {
     this.at = i >= 0 ? i : Math.min(this.at, rows.length - 1);
     // Only forget the remembered row when the data is complete: with another context still
     // loading, or a namespace that failed, the row may just not have arrived (or come back).
-    if (i >= 0 || !this.selKey || this.complete()) this.selKey = rowKey(rows[this.at]);
+    if (i >= 0 || !this.selKey || this.allLoaded()) this.selKey = rowKey(rows[this.at]);
   }
 
   // Is every selected context loaded for the shown kind, without error or warning?
-  complete() {
+  allLoaded() {
     const kind = this.kindDef();
     return [...this.selected].every((ctx) => {
       const d = this.data[this.keyOf(kind, ctx)];
