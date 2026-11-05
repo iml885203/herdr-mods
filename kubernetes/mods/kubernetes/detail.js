@@ -84,41 +84,107 @@ const PATHS = {
 const json = async (api, ctx, path) => (await api(ctx, path)).json();
 const quiet = (p) => p.catch(() => null);
 
+// Events change slowly and only the Events tab and the tab's warning count show
+// them, so a refresh reads them at most this often unless that tab is shown.
+const EVENTS_AGE = 45000;
+const EVENTS_RETRY = 30000; // after a failed events read
+
 // Everything the panel shows for one row; metrics are optional (no metrics-server: no usage).
-export async function loadDetail(api, r) {
+// A first load (no `prev`) reads everything. A refresh of the same row (`prev` and
+// the shown `tab`) reads only what that tab shows and keeps the rest of `prev`:
+// overview: the object, pods and metrics; yaml: the object; events: the events.
+// Events are also re-read when `prev`'s are older than EVENTS_AGE.
+export async function loadDetail(api, r, { tab, prev } = {}) {
   const { ctx, ns, name, kind } = r;
-  const obj = await json(api, ctx, PATHS[kind](ns, name));
-  const d = { obj, pods: [], podUsage: {}, nodeUsage: null, events: [], at: Date.now() };
+  const now = Date.now();
+  const need = !prev ? { obj: true, usage: true, events: true } : {
+    obj: tab !== "events",
+    usage: tab === "overview",
+    // After a failed read (e.g. no RBAC on events) wait before retrying, even on the Events tab.
+    events: now - (prev.eventsFailAt ?? 0) > EVENTS_RETRY && (tab === "events" || now - (prev.eventsAt ?? 0) > EVENTS_AGE),
+  };
+  const obj = need.obj ? await json(api, ctx, PATHS[kind](ns, name)) : prev.obj;
+  const d = prev ? { ...prev, obj, at: now } : { obj, pods: [], podUsage: {}, nodeUsage: null, events: [], eventsAt: 0, at: now };
   let podSel = null;
   // The list row's selector (from the API's table) also covers matchExpressions.
   if (kind === "deploy") podSel = r.selector || selectorOf(obj.spec?.selector?.matchLabels);
   if (kind === "svc") podSel = r.selector || selectorOf(obj.spec?.selector);
   const jobs = [];
-  if (kind === "pods") {
-    jobs.push(quiet(json(api, ctx, `/apis/metrics.k8s.io/v1beta1/namespaces/${ns}/pods/${name}`)).then((m) => { if (m) d.podUsage[name] = usage(m); }));
-  } else if (podSel) {
-    jobs.push(json(api, ctx, `/api/v1/namespaces/${ns}/pods?labelSelector=${encodeURIComponent(podSel)}`).then((l) => { d.pods = l.items ?? []; }));
-    jobs.push(quiet(json(api, ctx, `/apis/metrics.k8s.io/v1beta1/namespaces/${ns}/pods?labelSelector=${encodeURIComponent(podSel)}`))
-      .then((l) => { for (const m of l?.items ?? []) d.podUsage[m.metadata.name] = usage(m); }));
-  } else if (kind === "nodes") {
-    jobs.push(json(api, ctx, `/api/v1/pods?fieldSelector=${encodeURIComponent(`spec.nodeName=${name},status.phase!=Succeeded,status.phase!=Failed`)}`).then((l) => { d.pods = l.items ?? []; }));
-    jobs.push(quiet(json(api, ctx, `/apis/metrics.k8s.io/v1beta1/nodes/${name}`)).then((m) => {
-      if (m) d.nodeUsage = { cpu: cpuMilli(m.usage?.cpu), mem: memBytes(m.usage?.memory) };
-    }));
+  if (need.usage) {
+    // Built apart and swapped in whole, so a failed read leaves the shown data alone.
+    const pods = [], podUsage = {};
+    let nodeUsage = null;
+    if (kind === "pods") {
+      jobs.push(quiet(json(api, ctx, `/apis/metrics.k8s.io/v1beta1/namespaces/${ns}/pods/${name}`)).then((m) => { if (m) podUsage[name] = usage(m); }));
+    } else if (podSel) {
+      jobs.push(json(api, ctx, `/api/v1/namespaces/${ns}/pods?labelSelector=${encodeURIComponent(podSel)}`).then((l) => { pods.push(...(l.items ?? [])); }));
+      jobs.push(quiet(json(api, ctx, `/apis/metrics.k8s.io/v1beta1/namespaces/${ns}/pods?labelSelector=${encodeURIComponent(podSel)}`))
+        .then((l) => { for (const m of l?.items ?? []) podUsage[m.metadata.name] = usage(m); }));
+    } else if (kind === "nodes") {
+      jobs.push(json(api, ctx, `/api/v1/pods?fieldSelector=${encodeURIComponent(`spec.nodeName=${name},status.phase!=Succeeded,status.phase!=Failed`)}`).then((l) => { pods.push(...(l.items ?? [])); }));
+      jobs.push(quiet(json(api, ctx, `/apis/metrics.k8s.io/v1beta1/nodes/${name}`)).then((m) => {
+        if (m) nodeUsage = { cpu: cpuMilli(m.usage?.cpu), mem: memBytes(m.usage?.memory) };
+      }));
+    }
+    jobs.push(Promise.all(jobs.slice()).then(() => { d.pods = pods; d.podUsage = podUsage; d.nodeUsage = nodeUsage; }));
   }
-  if (kind === "deploy") {
-    // A deployment's story is mostly in its ReplicaSets' and pods' events (name-xxxx).
-    jobs.push(quiet(json(api, ctx, `/api/v1/namespaces/${ns}/events?limit=500`)).then((l) => {
-      d.events = (l?.items ?? []).filter((e) => e.involvedObject?.name === name || e.involvedObject?.name?.startsWith(name + "-"));
-    }));
-  } else if (kind !== "nodes") {
-    jobs.push(quiet(json(api, ctx, `/api/v1/namespaces/${ns}/events?fieldSelector=${encodeURIComponent(`involvedObject.name=${name}`)}`)).then((l) => { d.events = l?.items ?? []; }));
-  } else {
-    jobs.push(quiet(json(api, ctx, `/api/v1/events?fieldSelector=${encodeURIComponent(`involvedObject.name=${name}`)}`)).then((l) => { d.events = l?.items ?? []; }));
+  if (need.events) {
+    // A failed read keeps the events already shown and leaves eventsAt alone; retried after EVENTS_RETRY.
+    const events = (path, keep) => quiet(json(api, ctx, path)).then((l) => {
+      if (!l) { d.eventsNote = EVENTS_FAIL; d.eventsFailAt = now; return; }
+      d.events = (l.items ?? []).filter(keep).sort((a, b) => eventTime(b).localeCompare(eventTime(a)));
+      d.eventsAt = now; d.eventsNote = null;
+    });
+    if (kind === "deploy") {
+      // A deployment's story is mostly in its ReplicaSets' and pods' events (name-xxxx).
+      jobs.push(deployEvents(api, ctx, ns, name, podSel).then(({ items, note }) => {
+        d.eventsNote = note ?? null;
+        if (!items) { d.eventsFailAt = now; return; } // everything failed: keep the previous events, retry later
+        d.events = items.sort((a, b) => eventTime(b).localeCompare(eventTime(a)));
+        d.eventsAt = now;
+      }));
+    } else {
+      const scope = kind === "nodes" ? "" : `/namespaces/${ns}`;
+      jobs.push(events(`/api/v1${scope}/events?fieldSelector=${encodeURIComponent(`involvedObject.name=${name}`)}`, () => true));
+    }
   }
   await Promise.all(jobs);
-  d.events.sort((a, b) => eventTime(b).localeCompare(eventTime(a)));
   return d;
+}
+// A deployment's events: its own, its ReplicaSets' and its pods'. Asked of the server by
+// involvedObject.name (a namespace-wide list with a limit can miss them in a busy
+// namespace), one request per name, a few at a time. Falls back to a namespace-wide list.
+// Returns { items, note }: items is null when every read failed (the caller keeps the
+// previous events); note is a short error text when some or all reads failed.
+const EVENTS_FAIL = "Could not read events (showing the last ones read)";
+const EVENT_NAMES = 40, EVENT_PARALLEL = 6;
+export async function deployEvents(api, ctx, ns, name, podSel) {
+  const sel = podSel ? `?labelSelector=${encodeURIComponent(podSel)}` : "";
+  const [rs, pods] = await Promise.all([
+    quiet(json(api, ctx, `/apis/apps/v1/namespaces/${ns}/replicasets${sel}`)),
+    quiet(json(api, ctx, `/api/v1/namespaces/${ns}/pods${sel}`)),
+  ]);
+  const mine = (o) => (o.metadata?.ownerReferences ?? []).some((r) => r.kind === "Deployment" && r.name === name) || o.metadata?.name?.startsWith(name + "-");
+  const names = [name, ...(rs?.items ?? []).filter(mine).map((o) => o.metadata.name), ...(pods?.items ?? []).map((o) => o.metadata.name)];
+  const uniq = [...new Set(names)].slice(0, EVENT_NAMES);
+  if (!rs && !pods) {
+    const l = await quiet(json(api, ctx, `/api/v1/namespaces/${ns}/events?limit=500`));
+    if (!l) return { items: null, note: EVENTS_FAIL };
+    return { items: (l.items ?? []).filter((e) => e.involvedObject?.name === name || e.involvedObject?.name?.startsWith(name + "-")) };
+  }
+  const out = new Map();
+  let next = 0, failed = 0;
+  const worker = async () => {
+    while (next < uniq.length) {
+      const n = uniq[next++];
+      const l = await quiet(json(api, ctx, `/api/v1/namespaces/${ns}/events?fieldSelector=${encodeURIComponent(`involvedObject.name=${n}`)}`));
+      if (!l) failed++;
+      for (const e of l?.items ?? []) out.set(e.metadata?.uid ?? `${n}/${e.metadata?.name}`, e);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(EVENT_PARALLEL, uniq.length) }, worker));
+  if (uniq.length && failed === uniq.length) return { items: null, note: EVENTS_FAIL };
+  return { items: [...out.values()], ...(failed ? { note: `${failed} of ${uniq.length} event reads failed` } : {}) };
 }
 function usage(m) {
   const ctr = {};
@@ -322,13 +388,14 @@ export function draw(view, t, mono, r, d) {
 }
 
 export function drawEvents(t, d) {
-  if (!d.events.length) return [div().p(4).text_color(t.dim).child("No events (the API server keeps them about an hour)")];
-  return d.events.slice(0, 200).map((e, i) => v_flex().id(`ev-${i}`).gap(2).py(6).border_b(1).border_color(t.border)
+  const note = d.eventsNote ? [div().px(4).py(2).text_size(12).text_color(t.ansi3).child(d.eventsNote)] : [];
+  if (!d.events.length) return [...note, div().p(4).text_color(t.dim).child("No events (the API server keeps them about an hour)")];
+  return [...note, ...d.events.slice(0, 200).map((e, i) => v_flex().id(`ev-${i}`).gap(2).py(6).border_b(1).border_color(t.border)
     .child(h_flex().gap(8).items_center().text_size(12)
       .child(div().text_color(e.type === "Warning" ? t.ansi1 : t.ansi2).font_semibold().child(e.reason ?? ""))
       .child(div().text_color(t.dim).child(`${e.involvedObject?.kind ?? ""}/${e.involvedObject?.name ?? ""}`))
       .child(div().flex_1())
       .when((e.count ?? 1) > 1, (el) => el.child(div().text_color(t.ansi3).child(`×${e.count}`)))
       .child(div().text_color(t.dim).child(`${ago(eventTime(e))} ago`)))
-    .child(div().text_size(12).text_color(t.foreground).child(e.message ?? "")));
+    .child(div().text_size(12).text_color(t.foreground).child(e.message ?? "")))];
 }

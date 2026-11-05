@@ -1,6 +1,6 @@
 # Kubernetes
 
-A k9s-style Kubernetes browser for the [Herdr](https://herdr.dev) desktop app. Press `cmd-k` for a floating window that lists pods, deployments, nodes, services and ingresses across several kubeconfig contexts at once, with a detail side panel and live logs.
+Browse pods, deployments and logs across several Kubernetes clusters in one [Herdr](https://herdr.dev) window. Press `cmd-k`.
 
 ![Kubernetes](preview.png)
 

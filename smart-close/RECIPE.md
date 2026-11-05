@@ -1,6 +1,6 @@
 # Smart close
 
-A `cmd-w` key for Herdr that closes the right thing. If the current tab is split into several panes, `cmd-w` closes only the focused pane. If the tab has one pane, `cmd-w` closes the tab. It has no window of its own: nothing is drawn, nothing is clicked.
+`cmd-w` closes the pane you're in; the tab goes only with its last pane.
 
 ![Smart close](preview.png)
 

@@ -1,6 +1,7 @@
 #!/bin/sh
 # Usage: goal.sh <claude-session-id>
 # Prints a goal for the session, written by Claude (GOAL_MODEL, default sonnet) from its recent conversation.
+# GOAL_TIMEOUT (seconds, default 75) bounds the claude call.
 set -eu
 
 sid=$1
@@ -19,7 +20,8 @@ tail -n 4000 "$transcript" | jq -r '
   | (if .type == "user" then "USER: " else "ASSISTANT: " end) + $text
 ' 2>/dev/null \
   | perl -0pe 's/<system-reminder>.*?<\/system-reminder>//gs; s/<(command-[a-z-]+|local-command-[a-z]+)>.*?<\/\1>//gs' \
-  | tail -c 14000 > "$work/conversation.txt"
+  | tail -c 14000 \
+  | perl -0777 -pe 's/\A[\x80-\xBF]+//' > "$work/conversation.txt"  # tail cut may start inside a UTF-8 character: drop its tail bytes
 
 [ -s "$work/conversation.txt" ] || { echo "empty conversation" >&2; exit 3; }
 
@@ -58,8 +60,10 @@ Output only <goal>…</goal>, nothing outside the tags.
 EOF2
 } > "$work/prompt.txt"
 
+# macOS has no `timeout`: perl's alarm survives exec and kills claude with SIGALRM, so this
+# script exits 142 (128+14), which main.js reports as "took too long".
 cd "$work"
-claude -p --model "${GOAL_MODEL:-sonnet}" \
+perl -e 'alarm shift; exec @ARGV or die "exec: $!"' "${GOAL_TIMEOUT:-75}" claude -p --model "${GOAL_MODEL:-sonnet}" \
   --system-prompt "$(cat system.txt)" \
   --tools "" --no-session-persistence --disable-slash-commands \
   --strict-mcp-config --setting-sources "" \

@@ -1,12 +1,13 @@
 # Agent History
 
-Full-text search over your Claude Code, Codex and Pi sessions, in the [Herdr](https://herdr.dev) desktop app. Press `cmd-y`, type a few words, and resume the session you were looking for in a new tab. Based on [itisvincent/herdr-session-history](https://github.com/itisvincent/herdr-session-history) (MIT).
+Search every past Claude Code and Codex session by what was said, then resume it. Press `cmd-y`. Based on [itisvincent/herdr-session-history](https://github.com/itisvincent/herdr-session-history) (MIT).
 
 ![Agent History](preview.png)
 
 ## Features
 
 - Searches titles, your prompts, the agent's replies and tool input/output, including CJK text.
+- With several words, all of them must appear in the same message, or in the session's title/folder.
 - Shows the name you gave a Claude Code session with `/rename`, as `claude --resume` does; otherwise its generated title.
 - Results are newest first, each with the folder, age and a snippet with the match highlighted.
 - Resume opens a tab in the space whose folder matches the session (the current space when several match), or a new space if there is none.

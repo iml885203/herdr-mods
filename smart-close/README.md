@@ -1,6 +1,6 @@
 # Smart close
 
-A one-key replacement for closing things in the [Herdr](https://herdr.dev) desktop app. Press `cmd-w` and it closes the focused pane when the tab has several panes, or the whole tab when the tab has only one. There is no window and nothing to click.
+`cmd-w` closes the pane you're in; the tab goes only with its last pane.
 
 ![Smart close](preview.png)
 

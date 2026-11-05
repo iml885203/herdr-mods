@@ -4,6 +4,9 @@ import { appHome, closeOverlay, exec, focused, fonts, hc, home, props, readTextF
 
 const DATA = () => `${appHome()}/data/claude-goal`;
 const KEEP = 20;
+// macOS has no `timeout`: goal.sh bounds claude with perl's alarm (SCRIPT_TIMEOUT_S there);
+// this is the UI's own backstop so a hung hc/read/exec can never leave the popup stuck on "busy".
+const BUSY_LIMIT_MS = 90000;
 
 // Nerd Font glyphs, drawn apart from the label text (same helper as Orbit's widgets.js).
 const ICONS = { goal: "\u{f140}", error: "\u{f06a}" };
@@ -15,6 +18,9 @@ const tint = (color, alpha) => `${String(color).slice(0, 7)}${alpha}`;
 
 const isClaude = (foreground) => ((foreground?.argv?.[0] ?? "").split("/").pop() ?? "").startsWith("claude");
 
+// Claude Code writes ~/.claude/sessions/<pid>.json ({ sessionId, ... }) for each running
+// process. That file is an internal detail of Claude Code, not a documented interface: if a
+// future version moves or renames it, the popup says "not running Claude Code".
 async function sessionIdOf(terminal) {
   const got = await hc(["get", terminal, "--json"]);
   if (got.code !== 0) return null;
@@ -27,6 +33,7 @@ async function sessionIdOf(terminal) {
 async function generate(sessionId) {
   const result = await exec("sh", [`${appHome()}/mods/claude-goal/goal.sh`, sessionId]);
   const line = result.stdout.split("\n").map((l) => l.trim()).find(Boolean)?.replace(/^\/goal\s*/, "");
+  if (result.code === 142) throw new Error("Claude took too long to answer"); // SIGALRM from goal.sh
   if (result.code !== 0 || !line) throw new Error(result.stderr.trim() || `exit ${result.code}`);
   return `/goal ${line}`;
 }
@@ -63,24 +70,40 @@ export default class Goal extends View {
     this.error = this.terminal ? null : "No terminal focused";
     this.closed = false;
     this.handle = cx.focus_handle();
-    this.frame = 0;
-    // Timers only from init (QuickJS); the spinner ticks only while something is running.
+    this.busySince = Date.now();
+    this.run = 0; // bumped to abandon an in-flight generate whose result no longer matters
+    // Timers only from init (QuickJS). The spinner is native (.frames), not a timer; this one
+    // only checks the busy backstop once a second and redraws just when it trips.
     this.tasks = [
       cx.timer.after(50, () => this.handle.focus()),
-      cx.timer.every(110, (cx) => { if (this.busy()) { this.frame = (this.frame + 1) % SPINNER.length; cx.notify(); } }),
+      cx.timer.every(1000, (cx) => {
+        if (!this.busy() || Date.now() - this.busySince < BUSY_LIMIT_MS) return;
+        this.run++;
+        this.loading = false;
+        this.generating = false;
+        this.error = "Timed out";
+        cx.notify();
+      }),
     ];
     if (this.terminal) cx.spawn((cx) => this.open(cx));
   }
 
   // Shows this session's past goals; generates one only when there are none yet.
   async open(cx) {
+    const run = ++this.run;
+    const stale = () => run !== this.run || this.closed; // timed out or closed meanwhile: the UI moved on
     try {
-      this.sessionId = await sessionIdOf(this.terminal);
-      if (!this.sessionId) throw new Error("This terminal is not running Claude Code");
-      this.goals = (await readHistory(this.sessionId)).goals;
+      const sessionId = await sessionIdOf(this.terminal);
+      if (stale()) return;
+      if (!sessionId) throw new Error("This terminal is not running Claude Code");
+      this.sessionId = sessionId;
+      const { goals } = await readHistory(sessionId);
+      if (stale()) return;
+      this.goals = goals;
       this.loading = false;
       if (this.goals.length === 0) return this.generate(cx);
     } catch (error) {
+      if (stale()) return;
       this.error = String(error?.message ?? error);
     }
     this.loading = false;
@@ -88,13 +111,21 @@ export default class Goal extends View {
   }
 
   async generate(cx) {
+    const run = ++this.run;
     this.generating = true;
+    this.busySince = Date.now();
     this.error = null;
     if (!this.closed) cx.notify();
     try {
-      this.goals = await remember(this.sessionId, await generate(this.sessionId));
+      const goal = await generate(this.sessionId);
+      if (run !== this.run) return; // timed out meanwhile: an abandoned goal is not written to history
+      const goals = await remember(this.sessionId, goal);
+      if (run !== this.run) return;
+      this.goals = goals;
       this.at = 0;
+      this.error = null; // a late "Timed out" does not outlive a run that worked
     } catch (error) {
+      if (run !== this.run) return;
       this.error = String(error?.message ?? error);
     }
     this.generating = false;
@@ -125,9 +156,8 @@ export default class Goal extends View {
     if (!this.busy()) return null;
     return h_flex().id("goal-busy").px(10).py(8).gap(8).items_center().rounded(8)
       .border_1().border_color(tint(t.accent, "66")).bg(tint(t.accent, "14"))
-      .child(glyph(t.accent, SPINNER[this.frame]).text_size(15))
-      .child(div().flex_1().text_color(t.foreground).child(this.loading ? "Loading…" : "Writing a goal…"))
-      .when(this.generating, (el) => el.child(div().flex_none().text_size(10.5).text_color(t.dim).child("about 3 s")));
+      .child(div().flex_none().font_family(mono()).text_color(t.accent).text_size(15).frames(SPINNER, 110))
+      .child(div().flex_1().text_color(t.foreground).child(this.loading ? "Loading…" : "Writing a goal…"));
   }
 
   // Everything happens in this one handler: the mod stops once its popup closes.
@@ -170,7 +200,7 @@ export default class Goal extends View {
       .on_key_down((e, cx) => {
         const k = e.keystroke;
         if (k === "escape") return this.dismiss();
-        if (k === "cmd-r" && this.sessionId && !this.generating) { cx.spawn((cx) => this.generate(cx)); return; }
+        if (k === "cmd-r" && this.sessionId && !this.busy()) { cx.spawn((cx) => this.generate(cx)); return; }
         if (!sel) return;
         if (k === "enter") return this.bringIn(cx, sel.goal);
         if (k === "cmd-c") return this.copy(cx, sel.goal);

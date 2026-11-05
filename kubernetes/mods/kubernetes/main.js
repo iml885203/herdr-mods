@@ -9,8 +9,13 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list, VirtualListScrollHandle, Editor, EditorState, h_resizable, resizable_panel, Popup } from "gpui-base";
 import { loadDetail, draw, drawEvents, yamlOf } from "./detail.js";
-import { exec, run, theme, settings, fonts, props, closeOverlay, home, appHome, spaces, panes, agents, notify } from "herdr";
+import { exec, run, theme, settings, fonts, props, closeOverlay, spaces, panes, agents, notify } from "herdr";
 import * as fs from "fs/promises";
+import { DIR, ensureDir, api, table, namespacesOf, dropNamespace } from "./api.js";
+import { SINCE, TAIL, LEVELS, CHAR_W, nextLevel, lineParts, newLog, restoreLines, resetLog, streamsOf, due, logQuery, ingest, visibleLines, stepMatch, errorOf,
+  layout, indexAt, pick, pressPick, dragPick, releasePick, chosen, asText } from "./logs.js";
+
+const NOTIFY_MS = 300; // longest a dirty log waits for slower streams before it redraws
 
 // Nerd Font icons (falls back to the terminal font without the Nerd Font).
 const NERD_FONT = "JetBrainsMono Nerd Font";
@@ -85,82 +90,39 @@ const KINDS = [
   },
 ];
 
-const SINCE = ["tail", "5m", "15m", "30m", "1h", "3h", "6h"];
-const TAIL = 500, PER_POD = 3000, MAX_LINES = 30000;
-const LEVELS = { all: "All levels", warn: "≥ Warn", err: "Errors" };
-const RANK = { debug: 0, info: 1, warn: 2, err: 3 };
-const POD_COLORS = ["#4fb3ff", "#ffaf5f", "#d787d7", "#87d787", "#af87ff", "#ff875f", "#00d7ff", "#ffd700", "#ff5f87", "#87d7af"];
-const CHAR_W = 7.25, LINE_H = 20;
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch { return d; } };
 const save = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
 const sh = (s) => `'${String(s).replaceAll("'", `'\\''`)}'`;
-const pad = (n, w = 2) => String(n).padStart(w, "0");
-const byTs = (a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0);
-// The API trims trailing zeros of the fraction ("05.12Z"); pad it so timestamps sort as text.
-const normTs = (ts) => ts.replace(/\.(\d{1,9})Z$/, (_m, f) => `.${f.padEnd(9, "0")}Z`).replace(/:(\d\d)Z$/, ":$1.000000000Z");
+// Like Promise.allSettled, but at most `limit` calls run at once.
+async function settledPool(items, limit, fn) {
+  const out = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      try { out[i] = { status: "fulfilled", value: await fn(items[i]) }; }
+      catch (reason) { out[i] = { status: "rejected", reason }; }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return out;
+}
 const rowKey = (r) => `${r.kind}|${r.ctx}|${r.ns}|${r.name}`;
 const KIND_LABEL = { pods: "Pod", deploy: "Deployment", nodes: "Node", svc: "Service", ing: "Ingress" };
+const readOnlyNote = (ctx) => `${ICONS.lock} ${ctx} is read-only`;
+// A log is not restored as a view (it comes back from disk), a text view never is.
+const normalizeView = (view, keepLogs) => (view === "text" || (view === "logs" && !keepLogs) ? "list" : view ?? "list");
+const writeBig = async (file, text) => { await ensureDir(); await fs.writeFile(file, text + "\n").catch(() => {}); };
 const yamlSyntax = (t) => ({ keyword: t.ansi6, string: t.ansi3, comment: t.dim, function: t.ansi4, type: t.ansi5, number: t.ansi5, constant: t.ansi2 });
-const TOKEN_LEVEL = { INF: "info", INFO: "info", WRN: "warn", WARN: "warn", WARNING: "warn", ERR: "err", ERROR: "err", FTL: "err", FATAL: "err", DBG: "debug", DEBUG: "debug", TRC: "debug", TRACE: "debug" };
-
-function levelOf(text) {
-  if (/\b(FTL|FATAL|CRIT|CRITICAL|ERR|ERROR|EXCEPTION|panic)\b|Exception\b|"level":\s*"(error|fatal)"|\bfail:/i.test(text)) return "err";
-  if (/\b(WRN|WARN|WARNING)\b|"level":\s*"warn|\bwarn:/i.test(text)) return "warn";
-  if (/\b(DBG|DEBUG|TRC|TRACE|VRB|VERBOSE)\b|\bdbug:/.test(text)) return "debug";
-  return "info";
-}
-
-// kubecolor-ish: JSON keys, strings, numbers, levels, urls.
-const TOKEN = /("(?:[^"\\]|\\.)*")(\s*:)?|\b(INF|INFO|WRN|WARN|WARNING|ERR|ERROR|FTL|FATAL|DBG|DEBUG|TRC|TRACE)\b|(https?:\/\/[^\s"',)]+)|(?<![\w.-])(-?\d+(?:\.\d+)?)(?![\w.-])|\b(true|false|null)\b/g;
-function tokens(text, t) {
-  const out = [];
-  let at = 0, m;
-  TOKEN.lastIndex = 0;
-  while ((m = TOKEN.exec(text))) {
-    if (m.index > at) out.push([text.slice(at, m.index), null]);
-    if (m[1]) {
-      out.push([m[1], m[2] ? t.ansi6 : t.ansi3]);
-      if (m[2]) out.push([m[2], null]);
-    } else if (m[3]) {
-      const l = TOKEN_LEVEL[m[3]];
-      out.push([m[3], l === "err" ? t.ansi1 : l === "warn" ? t.ansi3 : l === "debug" ? t.dim : t.ansi2]);
-    } else if (m[4]) out.push([m[4], t.ansi4]);
-    else if (m[5]) out.push([m[5], t.ansi5]);
-    else out.push([m[6], t.ansi5]);
-    at = m.index + m[0].length;
-    if (m[0].length === 0) TOKEN.lastIndex++;
-  }
-  if (at < text.length) out.push([text.slice(at), null]);
-  return out;
-}
-// Splits colored tokens further at search matches.
-function highlight(segs, q) {
-  if (!q) return segs.map(([s, c]) => [s, c, false]);
-  const out = [];
-  for (const [s, c] of segs) {
-    const low = s.toLowerCase();
-    let at = 0, i;
-    while ((i = low.indexOf(q, at)) >= 0) {
-      if (i > at) out.push([s.slice(at, i), c, false]);
-      out.push([s.slice(i, i + q.length), c, true]);
-      at = i + q.length;
-    }
-    if (at < s.length) out.push([s.slice(at), c, false]);
-  }
-  return out;
-}
 
 // The window starts a fresh copy each time it opens; lists and the open view
 // are kept on disk (shown at once, then refreshed). Only small things here.
-const memo = { kind: null, data: {}, view: null, at: 0, filter: "" };
+const memo = { kind: null, data: {}, view: null, selKey: null, filter: "" };
 const DATA_AGE = 30 * 60 * 1000; // lists older than this are not kept on disk
-const DIR = () => `${appHome()}/data/kubernetes`;
 const LOG_CACHE = 3000, LOG_CACHE_AGE = 10 * 60 * 1000;
 const logKey = (L) => `${L.ctx}|${L.ns}|${L.kind}|${L.name}|${L.since}|${L.previous ? 1 : 0}`;
-// Dedupe key for a line (polls overlap by up to a second).
-const seenKey = (l) => `${l.key}|${l.ts}|${l.text.length}|${l.text.slice(0, 40)}`;
 const ASK_INLINE = 60000; // characters of log put straight into the agent's first message
 
 // The working folder of the agent (or shell) running in one of these terminals:
@@ -173,86 +135,8 @@ async function sessionFolder(terms) {
   return r?.code === 0 ? r.stdout.trim().split("\n")[0] || null : null;
 }
 
-const LOG_KEEP = ["ctx", "ns", "name", "kind", "selector", "since", "ts", "wrap", "level", "q", "filterOnly"];
-
-// ------------------------------------------------------------------ API
-// One read-only `kubectl proxy` per context (proxy.sh), shared by every copy
-// and reused across opens: auth (`aws eks get-token`) runs once instead of on
-// every request, and each list/log poll is a local HTTP call, not a process.
-// The proxy exits after 10 idle minutes (no heartbeat from here).
-const TABLE = "application/json;as=Table;v=v1;g=meta.k8s.io";
-const SECS = { "5m": 300, "15m": 900, "30m": 1800, "1h": 3600, "3h": 10800, "6h": 21600 };
-const proxies = new Map(), beats = new Map(), namespaces = new Map();
-const safe = (ctx) => ctx.replace(/[^\w.-]/g, "_");
-// A context's proxy lives on its hashed port, or the next free one if another context took it.
-// `port-<port>` in DIR() names the context a proxy there serves, so two contexts that hash
-// alike never share a proxy (and show one cluster's rows under the other's name).
-const PORTS = 500, TRIES = 10;
-function portFor(ctx, k = 0) { let h = 7; for (const ch of ctx) h = (h * 31 + ch.charCodeAt(0)) >>> 0; return 28400 + ((h + k) % PORTS); }
-const ownerFile = (port) => `${DIR()}/port-${port}`;
-async function ownerOf(port) { try { return (await fs.readFile(ownerFile(port), "utf8")).trim(); } catch { return ""; } } // fs can throw, not reject
-async function alive(base) {
-  try { const r = await fetch(`${base}/version`); return r.ok && Boolean((await r.json())?.gitVersion); } catch { return false; }
-}
-function beat(ctx) {
-  const now = Date.now();
-  if (now - (beats.get(ctx) ?? 0) < 60000) return;
-  beats.set(ctx, now);
-  fs.writeFile(`${DIR()}/hb-${safe(ctx)}`, String(now)).catch(() => {});
-}
-function proxy(ctx) {
-  let p = proxies.get(ctx);
-  if (p) return p;
-  p = (async () => {
-    let port = null;
-    for (let k = 0; k < TRIES && port === null; k++) {
-      const p = portFor(ctx, k);
-      if (!(await alive(`http://127.0.0.1:${p}`))) port = p;                     // free: start ours here
-      else if (await ownerOf(p) === ctx) return `http://127.0.0.1:${p}`;        // ours, already running
-    }                                                                           // else another context's: try the next
-    if (port === null) throw new Error(`no free port for the kubectl proxy of ${ctx}`);
-    const base = `http://127.0.0.1:${port}`;
-    await fs.mkdir(DIR(), { recursive: true }).catch(() => {});
-    await fs.writeFile(ownerFile(port), ctx).catch(() => {});
-    const hb = `${DIR()}/hb-${safe(ctx)}`;
-    await fs.writeFile(hb, String(Date.now())).catch(() => {});
-    beats.set(ctx, Date.now());
-    // Start it detached, then wait (in that one shell) until it answers.
-    const r = await exec("sh", ["-c", 'nohup sh "$0" "$1" "$2" "$3" >/dev/null 2>&1 & for i in $(seq 60); do curl -sf -o /dev/null "http://127.0.0.1:$2/version" && exit 0; sleep 0.1; done; exit 1',
-      `${appHome()}/mods/kubernetes/proxy.sh`, ctx, String(port), hb]);
-    if (r.code !== 0) throw new Error("kubectl proxy did not start (check `kubectl --context " + ctx + " get ns`)");
-    return base;
-  })();
-  proxies.set(ctx, p);
-  p.catch(() => proxies.delete(ctx));
-  return p;
-}
-async function api(ctx, path, accept) {
-  for (let attempt = 0; ; attempt++) {
-    const base = await proxy(ctx);
-    beat(ctx);
-    let r;
-    try { r = await fetch(base + path, accept ? { headers: { Accept: accept } } : undefined); }
-    catch (e) { proxies.delete(ctx); if (attempt) throw e; continue; } // proxy went idle: start it again
-    if (r.ok) return r;
-    const text = await r.text();
-    let msg = text;
-    try { msg = JSON.parse(text).message ?? text; } catch {}
-    throw new Error(`${r.status}: ${msg.trim().slice(0, 300)}`);
-  }
-}
-async function table(ctx, path) {
-  const t = await (await api(ctx, `${path}?includeObject=None`, TABLE)).json();
-  const names = (t.columnDefinitions ?? []).map((c) => c.name);
-  return (t.rows ?? []).map((row) => Object.fromEntries(names.map((n, i) => [n, row.cells[i]])));
-}
-async function namespacesOf(ctx) {
-  const hit = namespaces.get(ctx);
-  if (hit && Date.now() - hit.at < 60000) return hit.list;
-  const list = (await table(ctx, "/api/v1/namespaces")).map((c) => c.Name);
-  namespaces.set(ctx, { at: Date.now(), list });
-  return list;
-}
+const LOG_PARALLEL = 8; // log requests in flight at once
+const LOG_KEEP = ["previous", "ctx", "ns", "name", "kind", "selector", "since", "ts", "wrap", "level", "q", "filterOnly"];
 
 export default class K8s extends View {
   init(initial, cx) {
@@ -264,13 +148,19 @@ export default class K8s extends View {
     this.data = memo.data;
     this.loading = new Set();
     this.filter = memo.filter || load("filter", "");
-    this.at = memo.at || load("at", 0);
-    this.view = memo.view === "text" ? "list" : memo.view ?? "list"; // list | logs | text
-    if (this.view === "logs") this.view = "list"; // a log comes back from disk (restore)
+    this.at = 0; // the selected row's index; selKey is what is remembered (rows move between refreshes)
+    this.selKey = memo.selKey ?? load("selKey", null);
+    this.view = normalizeView(memo.view, false); // list | logs | text
     this.log = null;
     this.dataVer = 0;
     this.text = null;
-    this.panel = { open: load("panelOpen", false), tab: "overview", key: null, d: null, error: null, busy: false, yaml: null };
+    this.panel = { open: load("panelOpen", false), tab: "overview", key: null, d: null, error: null, busy: false, full: false, yaml: null };
+    // Everything later code reads is declared here, whether it is set in a handler or a task.
+    this.closed = false; this.saving = false; this.prefetched = false;
+    this.note = null; this.asking = false; this.showSettings = false;
+    this.size = null; this.lay = null; this.drag = null; this.thumb = null;
+    this.lastClick = 0; this.panelBefore = false;
+    this.rowsCache = null; this.poolCache = null; this.savedPref = null;
     this.ro = {}; // context -> read-only, from settings.json (prod contexts are read-only unless set otherwise)
     this.confirm = null;
     this.typing = null; // which input holds the keyboard
@@ -283,8 +173,8 @@ export default class K8s extends View {
     if (this.filter) this.input.set_value(this.filter);
     // Timers are kept so close() can stop them (a closed copy must not keep polling).
     this.tasks = [];
-    if (this.at) this.tasks.push(cx.timer.after(50, () => this.scroll.scroll_to_item(this.at, "center")));
-    this.input.on("change", (_e, cx) => { this.filter = memo.filter = this.input.value(); save("filter", this.filter); this.at = 0; this.scroll.scroll_to_item(0); this.syncPanel(cx); cx.notify(); });
+    if (this.selKey) this.tasks.push(cx.timer.after(50, () => { this.rows(); if (this.at) this.scroll.scroll_to_item(this.at, "center"); }));
+    this.input.on("change", (_e, cx) => { this.setFilter(this.input.value()); this.select(0); this.scroll.scroll_to_item(0); this.syncPanel(cx); cx.notify(); });
     // Enter goes one level in: the selected row's logs.
     this.input.on("submit", (_e, cx) => { this.leaveInput(cx); this.open(this.selectedRow(), cx); });
     this.input.on("focus", (_e, cx) => { this.typing = "list"; cx.notify(); });
@@ -295,7 +185,6 @@ export default class K8s extends View {
     this.search.on("submit", (e, cx) => { this.step(e?.shift ? -1 : 1); cx.notify(); });
     this.search.on("focus", (_e, cx) => { this.typing = "search"; cx.notify(); });
     this.search.on("blur", (_e, cx) => { if (this.typing === "search") this.typing = null; cx.notify(); });
-    if (this.log?.q) this.search.set_value(this.log.q);
 
     this.askInput = InputState.new({ placeholder: "What should the agent look at? (Enter to send)" });
     this.askInput.on("submit", (_e, cx) => this.sendAsk(cx));
@@ -351,7 +240,7 @@ export default class K8s extends View {
         const disk = JSON.parse(await fs.readFile(`${DIR()}/state.json`, "utf8"));
         for (const [k, v] of Object.entries(disk.data ?? {})) if (!this.data[k] || this.data[k].at < v.at) this.data[k] = { ...v, error: null };
         this.dataVer++;
-        if (disk.ui?.view === "logs" && disk.ui.log && !this.log && !p.view) {
+        if (disk.ui?.view === "logs" && disk.ui.log && !this.log) {
           let cache = null;
           try { cache = JSON.parse(await fs.readFile(`${DIR()}/logs.json`, "utf8")); } catch {}
           this.startLogs(disk.ui.log, cx, cache);
@@ -365,7 +254,7 @@ export default class K8s extends View {
 
   snapshot() {
     const L = this.log;
-    return { view: this.view === "text" ? "list" : this.view, kind: this.kind, filter: this.filter,
+    return { view: normalizeView(this.view, true), kind: this.kind, filter: this.filter,
       log: L ? Object.fromEntries(LOG_KEEP.map((k) => [k, L[k]])) : null };
   }
 
@@ -380,7 +269,7 @@ export default class K8s extends View {
     if (this.saving) return;
     this.saving = true;
     const body = this.stateJson();
-    fs.mkdir(DIR(), { recursive: true }).catch(() => {})
+    ensureDir()
       .then(() => fs.writeFile(`${DIR()}/state.json`, body)).catch(() => {})
       .finally(() => { this.saving = false; });
   }
@@ -409,13 +298,13 @@ export default class K8s extends View {
   async close() {
     this.closed = true;
     for (const task of this.tasks) task.cancel();
-    save("at", this.at);
+    save("selKey", this.selKey);
     const cache = this.logCache(), state = this.stateJson();
-    memo.view = this.view === "text" ? "list" : this.view;
-    memo.at = this.at; memo.kind = this.kind;
+    memo.view = normalizeView(this.view, true);
+    memo.selKey = this.selKey; memo.kind = this.kind;
     this.log = null;
     for (const x of [this.scroll, this.text?.editor, this.panel?.yaml, this.input, this.search, this.askInput, this.scaleInput, this.handle]) x?.release?.();
-    await fs.mkdir(DIR(), { recursive: true }).catch(() => {});
+    await ensureDir();
     await Promise.all([
       fs.writeFile(`${DIR()}/state.json`, state).catch(() => {}),
       cache ? fs.writeFile(`${DIR()}/logs.json`, JSON.stringify(cache)).catch(() => {}) : null,
@@ -432,14 +321,15 @@ export default class K8s extends View {
   keyOf(kind, ctx) { return `${kind.id}|${ctx}|${this.scopeOf(kind, ctx)}`; }
 
   setAllNs(on, cx) {
-    this.allNs = on; save("allNs", on); this.at = 0; this.scroll.scroll_to_item(0);
+    this.allNs = on; save("allNs", on); this.select(0); this.scroll.scroll_to_item(0);
     this.prefetched = false; this.refresh(cx); this.prefetch(cx); this.syncPanel(cx);
   }
 
   // ---------------------------------------------------------------- list
+  // kind: which kind to fetch (the shown one by default; the shown kind is never changed here).
   // maxAge: data younger than this is kept (opening often costs nothing).
-  refresh(cx, force, maxAge = 15000) {
-    const kind = this.kindDef();
+  refresh(cx, { kind: id = this.kind, force = false, maxAge = 15000 } = {}) {
+    const kind = KINDS.find((k) => k.id === id) ?? this.kindDef();
     for (const ctx of this.selected) {
       if (this.scopeOf(kind, ctx) === null) continue;
       const key = this.keyOf(kind, ctx);
@@ -450,38 +340,49 @@ export default class K8s extends View {
         try {
           const scope = this.scopeOf(kind, ctx);
           const nss = kind.cluster ? [""] : scope === "*" ? await namespacesOf(ctx) : [scope];
-          const parts = await Promise.all(nss.map(async (ns) => (await table(ctx, kind.path(ns))).map((c) => ({ ctx, kind: kind.id, ...kind.parse(c, ns) }))));
-          this.data[key] = { at: Date.now(), rows: parts.flat() };
+          // One namespace failing (deleted meanwhile, no access) must not hide the others.
+          const parts = await settledPool(nss, 16, async (ns) => (await table(ctx, kind.path(ns))).map((c) => ({ ctx, kind: kind.id, ...kind.parse(c, ns) })));
+          const prevRows = this.data[key]?.rows ?? [];
+          const failed = parts.map((p, i) => [p, nss[i]]).filter(([p]) => p.status === "rejected");
+          if (failed.length === nss.length && failed.length) throw failed[0][0].reason;
+          let lost = 0;
+          const kept = []; // a namespace that failed transiently keeps the rows it had
+          for (const [p, ns] of failed) {
+            if (/^404\b/.test(p.reason?.message ?? "")) dropNamespace(ctx, ns);
+            else { lost++; for (const row of prevRows) if (row.ns === ns) kept.push(row); }
+          }
+          this.data[key] = { at: Date.now(), rows: [...parts.flatMap((p) => (p.status === "fulfilled" ? p.value : [])), ...kept],
+            ...(lost ? { warn: `${lost} of ${nss.length} namespaces failed` } : {}) };
         } catch (e) {
           this.data[key] = { rows: this.data[key]?.rows ?? [], error: String(e?.message ?? e), at: Date.now() };
         } finally {
           this.loading.delete(key);
           this.dataVer++;
-          if (!this.closed) { this.syncPanel(cx); cx.notify(); }
+          if (!this.closed) {
+            const was = this.at;
+            this.rows();
+            if (this.at !== was) this.scroll.scroll_to_item(this.at); // the selected row moved: keep it in view
+            this.syncPanel(cx); cx.notify();
+          }
         }
       });
     }
     cx.notify();
-  
-}
+  }
 
   // Is this copy on screen? (a window always is; a tab or split only while its tab shows)
   visible() {
     if (props()?.overlay) return true;
     const tab = spaces().find((s) => s.active)?.tabs.find((t) => t.active);
     return Boolean(tab) && panes().some((p) => p.tab === tab.id && p.mod === "kubernetes");
-  
-}
+  }
 
   // Fills every kind once in the background so switching is instant.
   prefetch(cx) {
     if (this.prefetched) return;
     this.prefetched = true;
-    const current = this.kind;
-    for (const k of KINDS) if (k.id !== current) { this.kind = k.id; this.refresh(cx, false, 120000); }
-    this.kind = current;
-  
-}
+    for (const k of KINDS) if (k.id !== this.kind) this.refresh(cx, { kind: k.id, maxAge: 120000 });
+  }
 
   // The shown rows, worked out once per change (called several times a render).
   rows() {
@@ -501,7 +402,36 @@ export default class K8s extends View {
       }
     }
     this.rowsCache = { key, rows: out };
+    this.follow(out);
     return out;
+  }
+
+  // The selection is a row, not a position: after the rows change (a refresh, a
+  // filter) it moves to where its row now is. A row that is gone leaves the
+  // selection at the same position (clamped), now on whatever is there.
+  follow(rows) {
+    if (!rows.length) return; // nothing to select yet: keep the remembered row for when the data arrives
+    if (this.selKey && rowKey(rows[this.at] ?? {}) === this.selKey) return;
+    const i = this.selKey ? rows.findIndex((r) => rowKey(r) === this.selKey) : -1;
+    this.at = i >= 0 ? i : Math.min(this.at, rows.length - 1);
+    // Only forget the remembered row when the data is complete: with another context still
+    // loading, or a namespace that failed, the row may just not have arrived (or come back).
+    if (i >= 0 || !this.selKey || this.complete()) this.selKey = rowKey(rows[this.at]);
+  }
+
+  // Is every selected context loaded for the shown kind, without error or warning?
+  complete() {
+    const kind = this.kindDef();
+    return [...this.selected].every((ctx) => {
+      const d = this.data[this.keyOf(kind, ctx)];
+      return d && !d.error && !d.warn && !this.loading.has(this.keyOf(kind, ctx));
+    });
+  }
+
+  select(i) {
+    this.at = i;
+    const r = this.rows()[i];
+    this.selKey = r ? rowKey(r) : null;
   }
 
   // Completions for the word being typed: names of this kind, namespaces and
@@ -509,15 +439,9 @@ export default class K8s extends View {
   suggestions() {
     const words = this.filter.split(/\s+/), last = (words.pop() ?? "").toLowerCase();
     if (!last || (this.typing !== "list")) return [];
-    const kind = this.kindDef(), seen = new Set(words.map((w) => w.toLowerCase()));
-    const pool = new Set();
-    for (const ctx of this.selected) {
-      pool.add(ctx);
-      for (const r of this.data[this.keyOf(kind, ctx)]?.rows ?? []) { pool.add(r.name); if (r.ns) pool.add(r.ns); }
-    }
+    const seen = new Set(words.map((w) => w.toLowerCase()));
     const starts = [], has = [];
-    for (const name of pool) {
-      const low = name.toLowerCase();
+    for (const [name, low] of this.suggestionPool()) {
       if (low === last || seen.has(low)) continue;
       if (low.startsWith(last)) starts.push(name); else if (low.includes(last)) has.push(name);
     }
@@ -525,19 +449,42 @@ export default class K8s extends View {
     return [...starts.sort(byLen), ...has.sort(byLen)].slice(0, 6);
   }
 
+  // Every name that can be completed, with its lower-case form: worked out when
+  // the data, kind or contexts change, not on every keystroke.
+  suggestionPool() {
+    const kind = this.kindDef();
+    const key = `${this.dataVer}|${kind.id}|${[...this.selected]}|${this.allNs}`;
+    if (this.poolCache?.key === key) return this.poolCache.pool;
+    const names = new Set();
+    for (const ctx of this.selected) {
+      names.add(ctx);
+      for (const r of this.data[this.keyOf(kind, ctx)]?.rows ?? []) { names.add(r.name); if (r.ns) names.add(r.ns); }
+    }
+    const pool = [...names].map((n) => [n, n.toLowerCase()]);
+    this.poolCache = { key, pool };
+    return pool;
+  }
+
   complete(word, cx) {
     const words = this.filter.split(/\s+/);
     words[words.length - 1] = word;
     const v = words.join(" ") + " ";
-    this.input.set_value(v); this.filter = memo.filter = v; save("filter", v);
-    this.at = 0; this.scroll.scroll_to_item(0);
+    this.setFilter(v, true);
+    this.select(0); this.scroll.scroll_to_item(0);
     this.input.focus();
     cx.notify();
   }
 
+  // State only; setFilter/applyKind never fetch or redraw.
+  setFilter(v, syncInput = false) {
+    if (syncInput) this.input.set_value(v);
+    this.filter = memo.filter = v; save("filter", v);
+  }
+  applyKind(id) { this.kind = memo.kind = id; save("kind", id); }
+
   setKind(id, cx) {
     if (this.kind === id) return;
-    this.kind = memo.kind = id; save("kind", id); this.at = 0; this.scroll.scroll_to_item(0);
+    this.applyKind(id); this.select(0); this.scroll.scroll_to_item(0);
     this.refresh(cx);
     this.syncPanel(cx);
   }
@@ -552,7 +499,7 @@ export default class K8s extends View {
   move(delta, cx) {
     const n = this.rows().length;
     if (!n) return;
-    this.at = Math.max(0, Math.min(n - 1, this.at + delta));
+    this.select(Math.max(0, Math.min(n - 1, this.at + delta)));
     this.scroll.scroll_to_item(this.at);
     this.loadPanel(cx);
     cx.notify();
@@ -590,7 +537,7 @@ export default class K8s extends View {
 
   shell(r) {
     if (!r || r.kind !== "pods") { this.note = "shell: pick a pod (1 Pods)"; return; }
-    if (this.isReadOnly(r.ctx)) { this.note = `${ICONS.lock} ${r.ctx} is read-only`; return; }
+    if (this.isReadOnly(r.ctx)) { this.note = readOnlyNote(r.ctx); return; }
     const cmd = `kubectl --context ${sh(r.ctx)} -n ${sh(r.ns)} exec -it ${sh(r.name)} -- sh -c 'command -v bash >/dev/null && exec bash || exec sh'`;
     run("terminal.open", { argv: ["sh", "-c", cmd], place: "tab", name: `${r.ctx}/${r.name}` });
     this.hide();
@@ -615,12 +562,12 @@ export default class K8s extends View {
 
   setReadOnly(ctx, on) {
     this.ro = { ...this.ro, [ctx]: on };
-    fs.mkdir(DIR(), { recursive: true }).catch(() => {})
+    ensureDir()
       .then(() => fs.writeFile(`${DIR()}/settings.json`, JSON.stringify({ readOnly: this.ro }, null, 2))).catch(() => {});
   }
 
   ask(c) {
-    if (this.isReadOnly(c.ctx)) { this.note = `${ICONS.lock} ${c.ctx} is read-only`; return; }
+    if (this.isReadOnly(c.ctx)) { this.note = readOnlyNote(c.ctx); return; }
     this.confirm = c;
     if (c.input) { this.scaleInput.set_value(String(c.input)); this.scaleInput.focus(); } else this.handle.focus();
   }
@@ -640,13 +587,13 @@ export default class K8s extends View {
   }
 
   mutate(ctx, args, title, cx) {
-    if (this.isReadOnly(ctx)) { this.note = `${ICONS.lock} ${ctx} is read-only`; return; }
+    if (this.isReadOnly(ctx)) { this.note = readOnlyNote(ctx); return; }
     this.note = `${title}…`;
     cx.spawn(async (cx) => {
       const r = await exec("kubectl", ["--context", ctx, ...args]).catch((e) => ({ code: 1, stderr: String(e) }));
       this.note = r.code === 0 ? `${ICONS.ok} ${(r.stdout || title).trim().split("\n").pop()}` : `${ICONS.fail} ${(r.stderr || "failed").trim().split("\n").pop()}`;
-      this.refresh(cx, true);
-      this.loadPanel(cx, true);
+      this.refresh(cx, { force: true });
+      this.loadPanel(cx, true, true);
       cx.notify();
     });
     cx.notify();
@@ -682,28 +629,34 @@ export default class K8s extends View {
   syncPanel(cx) {
     const r = this.selectedRow();
     if (this.panel.open && r && this.panel.key !== rowKey(r)) this.loadPanel(cx);
-  
-}
+  }
 
   // Loads the selected row into the side panel. One load at a time: rows
   // passed over while one is in flight are skipped, and the row you stop on
   // is loaded when it finishes. (No timers: this runs from tasks too.)
-  loadPanel(cx, again) {
+  // A refresh of the row already shown fetches only what its tab shows; `full`
+  // (after a change to the cluster) fetches everything.
+  loadPanel(cx, again, full = false) {
     const P = this.panel, r = this.selectedRow();
     if (this.closed || !P.open || !r) return;
     const key = rowKey(r);
     if (!again && P.key === key) return;
     if (P.key !== key) { P.key = key; P.d = null; P.error = null; P.yaml?.release(); P.yaml = null; }
+    if (full) P.full = true;
     if (P.busy) return;
     P.busy = true;
     cx.spawn(async (cx) => {
       let done = null;
       try {
-        while (!this.closed && P.key && P.key !== done) {
-          const want = P.key, row = this.selectedRow();
+        while (!this.closed && P.key) {
+          const want = P.key, tab = P.tab, stamp = `${want}|${tab}`;
+          if (stamp === done) break;
+          const row = this.selectedRow();
           if (!row || rowKey(row) !== want) break;
+          const opts = P.full || !P.d ? {} : { tab, prev: P.d };
+          P.full = false;
           try {
-            const d = await loadDetail(api, row);
+            const d = await loadDetail(api, row, opts);
             if (this.closed || P.key !== want) continue;
             const changed = P.d?.obj?.metadata?.resourceVersion !== d.obj?.metadata?.resourceVersion;
             P.d = d; P.error = null;
@@ -712,18 +665,17 @@ export default class K8s extends View {
             // A failed refresh keeps what is shown; only a first load shows the error.
             if (P.key === want) { if (P.d) this.note = `panel: ${String(e?.message ?? e)}`; else P.error = String(e?.message ?? e); }
           }
-          done = want;
+          done = stamp;
         }
       } finally { P.busy = false; if (!this.closed) cx.notify(); }
     });
-  
-}
+  }
 
   openPod(ctx, ns, name, cx) {
-    this.kind = memo.kind = "pods"; save("kind", "pods"); this.dataVer++;
+    this.applyKind("pods"); this.dataVer++;
     const scope = this.allNs || ns === this.defaultNs[ctx];
     if (!scope) this.setAllNs(true, cx);
-    this.input.set_value(name); this.filter = memo.filter = name; this.at = 0;
+    this.setFilter(name, true); this.select(0);
     this.refresh(cx);
     cx.notify();
   }
@@ -733,6 +685,11 @@ export default class K8s extends View {
     const P = this.panel;
     if (this.closed || P.tab !== "yaml" || P.yaml || !P.d) return;
     P.yaml = EditorState.new({ language: "yaml", readonly: true, value: yamlOf(P.d.obj), font_family: settings().font_family, font_size: 12, syntax: yamlSyntax(theme()) });
+  }
+
+  // Only the shown tab's data is fetched again (see loadDetail), so a new tab refreshes at once.
+  setTab(id, cx) {
+    this.panel.tab = id; this.ensureYaml(); this.loadPanel(cx, true);
   }
 
   togglePanel(cx) { this.setPanel(!this.panel.open, cx); }
@@ -750,7 +707,7 @@ export default class K8s extends View {
     if (!r) return v_flex().size_full().p(16).text_color(t.dim).child("Select a row");
     const ro = this.isReadOnly(r.ctx);
     const kindLabel = KIND_LABEL[r.kind];
-    const tab = (id, label) => this.chip(t, `ptab-${id}`, label, P.tab === id, () => { P.tab = id; this.ensureYaml(); });
+    const tab = (id, label) => this.chip(t, `ptab-${id}`, label, P.tab === id, (cx) => this.setTab(id, cx));
     let body;
     if (P.error) body = [div().text_color(t.ansi1).child(P.error)];
     else if (!P.d) body = [div().text_color(t.dim).child("Loading…")];
@@ -776,7 +733,7 @@ export default class K8s extends View {
           return div().id(`act-${id}`).px(8).py(3).rounded(6).text_size(12).border_1().border_color(t.border)
             .text_color(off ? t.dim : t.foreground).when(!off, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
             .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-            .on_click((_e, cx) => { if (off) this.note = `${ICONS.lock} ${r.ctx} is read-only`; else go(cx); cx.notify(); })
+            .on_click((_e, cx) => { if (off) this.note = readOnlyNote(r.ctx); else go(cx); cx.notify(); })
             .child(lbl(off ? `${ICONS.lock} ${label.replace(/^\S+ /, "")}` : label));
         })))
         .child(h_flex().gap(2).child(tab("overview", "Overview")).child(tab("events", evWarn ? `Events · ${evWarn} ${ICONS.warn}` : "Events")).child(tab("yaml", "YAML"))))
@@ -799,27 +756,13 @@ export default class K8s extends View {
 
   // ---------------------------------------------------------------- logs
   startLogs(target, cx, cache) {
-    const prev = this.log;
-    // The toolbar's choices (range, time, wrap, level, text mode) carry over to every log.
-    const pref = load("logPrefs", {});
-    target = { since: pref.since, ts: pref.ts, wrap: pref.wrap, level: pref.level, ...target };
-    this.log = {
-      ...target, gen: (prev?.gen ?? 0) + 1,
-      since: target.since ?? prev?.since ?? "tail", follow: true, previous: false,
-      lines: [], seen: new Set(), cursor: {}, streams: null, pods: {}, hidden: new Set(),
-      q: target.q ?? "", filterOnly: target.filterOnly ?? false, level: target.level ?? "all",
-      ts: target.ts ?? prev?.ts ?? true, wrap: target.wrap ?? prev?.wrap ?? true,
-      match: -1, version: 0, error: null, busy: false, loaded: false,
-    };
-    const L = this.log;
+    // The toolbar's choices (range, time, wrap, level) carry over to every log.
+    const L = this.log = newLog(target, this.log, load("logPrefs", {}));
     // Closed less than 10 minutes ago: show what was there and fetch only what came after.
-    if (cache && cache.key === logKey(L) && Date.now() - cache.at < LOG_CACHE_AGE) {
-      L.lines = cache.lines.map((l) => ({ ...l, ts: normTs(l.ts) }));
-      L.seen = new Set(L.lines.map(seenKey));
-      L.cursor = cache.cursor ?? {}; L.pods = cache.pods ?? {}; L.loaded = true; L.version++;
-    }
+    if (cache && cache.key === logKey(L) && Date.now() - cache.at < LOG_CACHE_AGE) restoreLines(L, cache);
     this.search.set_value(L.q);
     this.view = memo.view = "logs";
+    this.saveLogPrefs();
     this.persist();
     this.stick = true;
     this.pollLogs(cx, true);
@@ -830,146 +773,104 @@ export default class K8s extends View {
   reload(cx) {
     const L = this.log;
     if (!L) return;
-    L.gen++; L.lines = []; L.seen = new Set(); L.cursor = {}; L.streams = null; L.version++; L.loaded = false; L.match = -1; L.busy = false;
-    L.picked = new Set(); L.anchor = null;
+    resetLog(L);
     this.stick = true;
     this.pollLogs(cx, true);
   }
 
+  // Remembers the toolbar's choices for the next log (only when one changed).
+  saveLogPrefs() {
+    const L = this.log, sp = this.savedPref;
+    if (!L || (sp && sp.since === L.since && sp.ts === L.ts && sp.wrap === L.wrap && sp.level === L.level)) return;
+    this.savedPref = { since: L.since, ts: L.ts, wrap: L.wrap, level: L.level };
+    save("logPrefs", this.savedPref);
+  }
+  setLogOpt(name, value) { this.log[name] = value; this.saveLogPrefs(); }
+
   // Each pod/container is read with the log API: first the chosen range, then
   // only what came after its last line (sinceTime), every second while shown
-  // (every 10 s in a hidden tab). Pods behind a selector are re-listed every 15 s.
+  // (every 10 s in a hidden tab). A container with nothing new is asked less
+  // often (2, 4, then 8 s apart; see logs.js). Pods behind a selector are
+  // re-listed every 15 s. The window redraws only when something changed:
+  // new lines, a new error, or the first load (its spinner).
+  //
+  // Requests are not awaited together: each stream is read by a task of its own and
+  // merged when it answers, at most LOG_PARALLEL at a time, so one slow or hung
+  // stream delays only itself. (There is no timeout: fetch has no abort option and a
+  // timer may not be started from a callback, so a request that never answers keeps
+  // its slot, and its stream is not asked again meanwhile.)
   pollLogs(cx, initial) {
     const L = this.log;
     if (!L || L.busy || this.view !== "logs") return;
-    if (!initial && (!L.follow || L.previous || !L.loaded)) return;
-    if (!initial && !this.visible() && Date.now() - (L.at ?? 0) < 10000) return;
+    // A paused or previous-container log is read once; streams not yet read (more than LOG_PARALLEL) still are.
+    const unread = !L.streams || L.streams.some((s) => !s.read);
+    if (!initial && ((!L.follow || L.previous) && !unread || !L.loaded)) return;
+    if (!initial && !this.visible() && Date.now() - L.at < 10000) return;
     const gen = L.gen, live = () => !this.closed && this.log === L && L.gen === gen;
+    const first = !L.loaded, wasError = L.error;
     L.busy = true;
     cx.spawn(async (cx) => {
+      let batch = [];
       try {
         if (!L.streams || Date.now() - L.streamsAt > 15000) {
           const pods = L.kind === "pods"
             ? [await (await api(L.ctx, `/api/v1/namespaces/${L.ns}/pods/${L.name}`)).json()]
             : (await (await api(L.ctx, `/api/v1/namespaces/${L.ns}/pods?labelSelector=${encodeURIComponent(L.selector)}`)).json()).items ?? [];
-          L.streams = pods.flatMap((p) => (p.spec?.containers ?? []).map((c) => ({ pod: p.metadata.name, ctr: c.name, key: `${p.metadata.name}/${c.name}` })));
+          if (!live()) return;
+          L.streams = streamsOf(pods, L.streams ?? []);
           L.streamsAt = Date.now();
         }
-        const errors = [];
-        const texts = await Promise.all(L.streams.map(async (s) => {
-          const q = [`container=${encodeURIComponent(s.ctr)}`, "timestamps=true"];
-          if (L.previous) q.push("previous=true");
-          if (L.cursor[s.key]) q.push(`sinceTime=${encodeURIComponent(L.cursor[s.key])}`);
-          else if (L.since === "tail") q.push(`tailLines=${TAIL}`);
-          else q.push(`sinceSeconds=${SECS[L.since]}`, `tailLines=${PER_POD}`);
-          try { return [s, await (await api(L.ctx, `/api/v1/namespaces/${L.ns}/pods/${s.pod}/log?${q.join("&")}`)).text()]; }
-          catch (e) { if (!/waiting to start|ContainerCreating|PodInitializing/.test(e.message)) errors.push(`${s.key}: ${e.message}`); return [s, ""]; }
-        }));
-        if (!live()) return;
-        this.ingest(L, texts);
-        L.error = errors.length ? errors[0] + (errors.length > 1 ? `  (+${errors.length - 1} more)` : "") : !L.streams.length ? "no pods match this selector" : null;
+        const now = Date.now(), streams = L.streams;
+        const want = (s) => !s.flying && (L.previous || !L.follow ? !s.read : initial || due(s, now));
+        batch = streams.filter(want).slice(0, Math.max(0, LOG_PARALLEL - L.flying));
+        for (const s of batch) { s.flying = true; L.flying++; }
+        L.error = errorOf(L);
+        if (!batch.length && !streams.some((s) => s.flying)) L.loaded = true;
       } catch (e) {
-        if (live()) L.error = String(e?.message ?? e);
+        if (live()) { L.error = String(e?.message ?? e); L.loaded = true; }
       } finally {
-        if (live()) { L.loaded = true; L.at = Date.now(); }
-        L.busy = false;
-        if (!this.closed) cx.notify();
+        if (live()) L.at = Date.now();
+        if (live()) L.busy = false; // a reset or another log already cleared it for a stale run
+        if (!this.closed && (first || L.loaded && L.error !== wasError)) cx.notify();
+      }
+      if (!live()) { for (const s of batch) { s.flying = false; L.flying--; } return; }
+      for (const s of batch) {
+        cx.spawn(async (cx) => {
+          let body = "", err = null;
+          try { body = await (await api(L.ctx, `/api/v1/namespaces/${L.ns}/pods/${s.pod}/log?${logQuery(L, s, L.streams.length)}`)).text(); }
+          catch (e) { if (!/waiting to start|ContainerCreating|PodInitializing/.test(e.message)) err = `${s.key}: ${e.message}`; }
+          s.flying = false; L.flying--;
+          if (!live()) return;
+          const was = { version: L.version, error: L.error, loaded: L.loaded };
+          if (err) L.errs.set(s.key, err); else L.errs.delete(s.key);
+          ingest(L, [[s, body]]);
+          L.error = errorOf(L); L.loaded = true; L.at = Date.now();
+          // One notify per batch: the first result, then when the last request in flight is done —
+          // or after NOTIFY_MS, so a request that never answers can't freeze the rest of the log.
+          if (L.version !== was.version || L.error !== was.error) L.dirty = true;
+          if (!was.loaded || (L.dirty && (L.flying <= 0 || Date.now() - (L.notifiedAt ?? 0) > NOTIFY_MS))) {
+            L.dirty = false; L.notifiedAt = Date.now(); cx.notify();
+          }
+        });
       }
     });
-    cx.notify();
-  }
-
-  ingest(L, texts) {
-    const fresh = [];
-    for (const [s, body] of texts) {
-      for (const raw of body.split("\n")) {
-        if (!raw) continue;
-        const sp = raw.indexOf(" ");
-        const ts = normTs(sp < 0 ? raw : raw.slice(0, sp)), text = sp < 0 ? "" : raw.slice(sp + 1);
-        const line = { pod: s.pod, ctr: s.ctr, key: s.key, ts, text };
-        const k = seenKey(line);
-        if (L.seen.has(k)) continue;
-        L.seen.add(k);
-        const d = new Date(ts.slice(0, 23) + "Z");
-        line.time = isNaN(d) ? ts : `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}`;
-        line.text = text.includes("\x1b") ? text.replace(/\x1b\[[0-9;]*m/g, "") : text;
-        line.level = levelOf(line.text);
-        fresh.push(line);
-        L.pods[s.pod] ??= { color: POD_COLORS[Object.keys(L.pods).length % POD_COLORS.length], n: 0 };
-        L.pods[s.pod].n++;
-        if (!L.cursor[s.key] || ts > L.cursor[s.key]) L.cursor[s.key] = ts;
-      }
-    }
-    if (!fresh.length) return;
-    fresh.sort(byTs);
-    const last = L.lines[L.lines.length - 1];
-    for (const l of fresh) L.lines.push(l); // in place: no copy of up to 30000 lines per poll
-    if (last && fresh[0].ts < last.ts) L.lines.sort(byTs);
-    if (L.lines.length > MAX_LINES) {
-      const gone = L.lines.splice(0, L.lines.length - MAX_LINES);
-      for (const l of gone) L.seen.delete(seenKey(l));
-    }
-    L.version++;
-  }
-
-  visibleLines() {
-    const L = this.log;
-    const q = L.q.toLowerCase();
-    const key = `${L.gen}|${L.version}|${[...L.hidden].join(",")}|${q}|${L.filterOnly}|${L.level}`;
-    if (this.cache?.key === key) return this.cache;
-    const min = L.level === "err" ? 3 : L.level === "warn" ? 2 : 0;
-    // Lower-cased text is made only while searching, and kept on the line after.
-    const has = (l) => (l.low ??= l.text.toLowerCase()).includes(q);
-    const lines = L.lines.filter((l) => !L.hidden.has(l.pod) && RANK[l.level] >= min && (!L.filterOnly || !q || has(l)));
-    const matches = [];
-    if (q && !L.filterOnly) for (let i = 0; i < lines.length; i++) if (has(lines[i])) matches.push(i);
-    this.cache = { key, lines, matches, q };
-    return this.cache;
+    if (first) cx.notify();
   }
 
   step(dir) {
     const L = this.log;
     if (!L) return;
-    const { matches } = this.visibleLines();
-    if (!matches.length) return;
-    L.match = L.match < 0 ? (dir > 0 ? 0 : matches.length - 1) : (L.match + dir + matches.length) % matches.length;
-    this.scrollToLine(matches[L.match]);
+    const i = stepMatch(L, visibleLines(L).matches, dir);
+    if (i >= 0) this.scrollToLine(i);
   }
 
-  setSince(s, cx) { const L = this.log; if (!L || L.since === s) return; L.since = s; this.reload(cx); }
+  setSince(s, cx) { const L = this.log; if (!L || L.since === s) return; this.setLogOpt("since", s); this.reload(cx); }
 
   // ------------------------------------------------------- pick, copy, ask
-  // Click a line to pick it, shift-click for a range, cmd-click to add one.
-  pick(i, mods, lines) {
-    const L = this.log, l = lines[i];
-    if (!l) return;
-    L.picked ??= new Set();
-    if (mods?.shift && L.anchor && lines.includes(L.anchor)) {
-      const a = lines.indexOf(L.anchor), [lo, hi] = a < i ? [a, i] : [i, a];
-      L.picked = new Set(lines.slice(lo, hi + 1));
-    } else if (mods?.platform || mods?.control) {
-      if (L.picked.has(l)) L.picked.delete(l); else L.picked.add(l);
-      L.anchor = l;
-    } else {
-      L.picked = L.picked.size === 1 && L.picked.has(l) ? new Set() : new Set([l]);
-      L.anchor = l;
-    }
-    this.stick = false;
-  }
-
-  // The picked lines, else everything shown (search/level/pod filters applied).
-  chosen() {
-    const L = this.log, { lines } = this.visibleLines();
-    const picked = lines.filter((l) => L.picked?.has(l));
-    return picked.length ? picked : lines;
-  }
-
-  asText(lines) { return lines.map((l) => `${l.ts} ${l.pod}/${l.ctr} ${l.text}`).join("\n"); }
-
   copyLines(cx) {
     if (!this.log) return;
-    const lines = this.chosen();
-    cx.write_to_clipboard(this.asText(lines));
+    const lines = chosen(this.log, visibleLines(this.log).lines);
+    cx.write_to_clipboard(asText(lines));
     this.note = `Copied ${lines.length} lines`;
     notify({ title: `Copied ${lines.length} log lines`, timeout: 2000 });
   }
@@ -981,10 +882,10 @@ export default class K8s extends View {
   // of the tab you are on (hc send waits until it pauses, then submits).
   sendAsk(cx, where = "new") {
     if (!this.log) return;
-    const L = this.log, lines = this.chosen(), q = this.askInput.value().trim();
+    const L = this.log, lines = chosen(L, visibleLines(L).lines), q = this.askInput.value().trim();
     if (!lines.length) return;
     const what = `${KIND_LABEL[L.kind].toLowerCase()} ${L.name} (context ${L.ctx}, namespace ${L.ns})`;
-    const text = this.asText(lines);
+    const text = asText(lines);
     const big = text.length > ASK_INLINE;
     const file = `${DIR()}/ask-${Date.now()}.log`;
     const shown = big ? text.slice(-ASK_INLINE).replace(/^[^\n]*\n/, "") : text;
@@ -998,7 +899,7 @@ export default class K8s extends View {
       const agent = agents().find((a) => a.tab === tab?.id);
       if (!agent) { this.note = "No agent in the current tab"; return; }
       cx.spawn(async (cx) => {
-        if (big) { await fs.mkdir(DIR(), { recursive: true }).catch(() => {}); await fs.writeFile(file, text + "\n").catch(() => {}); }
+        if (big) await writeBig(file, text);
         const r = await exec("hc", ["send", agent.address, task]).catch((e) => ({ code: 1, stderr: String(e) }));
         if (r.code !== 0) { this.note = `${ICONS.fail} ${(r.stderr || "hc send failed").trim().split("\n").pop()}`; if (!this.closed) cx.notify(); return; }
         this.asking = false; this.askInput.set_value("");
@@ -1008,10 +909,7 @@ export default class K8s extends View {
       return;
     }
     cx.spawn(async (cx) => {
-      if (big) {
-        await fs.mkdir(DIR(), { recursive: true }).catch(() => {});
-        await fs.writeFile(file, text + "\n").catch(() => {});
-      }
+      if (big) await writeBig(file, text);
       const folder = await sessionFolder(terms) ?? space?.folder;
       run("tab.new", { name: `ask: ${L.name}`, argv: ["claude"], task, ...(folder ? { folder } : {}) });
       this.asking = false; this.askInput.set_value("");
@@ -1021,31 +919,6 @@ export default class K8s extends View {
   }
 
 
-  // Rows of the log area: where each starts, for scrolling and for finding the
-  // line under the pointer.
-  // Heights and tops are worked out once per change of lines, width or wrap,
-  // not on every scroll or drag (each of those renders).
-  layout(lines, key, cols, wrap) {
-    const k = `${key}|${cols}|${wrap}`;
-    let c = this.layCache;
-    if (c?.key !== k) {
-      const n = lines.length, heights = new Array(n), tops = new Array(n + 1);
-      tops[0] = 0;
-      for (let i = 0; i < n; i++) {
-        heights[i] = wrap ? Math.max(1, Math.ceil((lines[i].text.length * 1.06) / cols)) * LINE_H + 2 : LINE_H + 2;
-        tops[i + 1] = tops[i] + heights[i];
-      }
-      c = this.layCache = { key: k, heights, tops, total: tops[n], n };
-    }
-    return { ...c, maxTop: Math.max(0, c.total - this.logH) };
-  }
-  indexAt(y) {
-    const { tops, n } = this.lay ?? { tops: [0], n: 0 };
-    if (!n) return -1;
-    let lo = 0, hi = n - 1;
-    while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (tops[mid] <= y) lo = mid; else hi = mid - 1; }
-    return lo;
-  }
   scrollToLine(i) {
     const lay = this.lay;
     if (!lay || i < 0) return;
@@ -1058,28 +931,24 @@ export default class K8s extends View {
   pressLine(e, lines) {
     const L = this.log, y = e.local_position?.y;
     if (y === undefined) return;
-    const i = this.indexAt(y + this.logTop);
+    const i = indexAt(this.lay, y + this.logTop);
     if (i < 0) return;
-    if (e.modifiers?.shift || e.modifiers?.platform || e.modifiers?.control) { this.pick(i, e.modifiers, lines); return; }
-    this.drag = { anchor: i, moved: false, sole: L.picked?.size === 1 && L.picked.has(lines[i]) };
-    L.anchor = lines[i];
-    L.picked = new Set([lines[i]]);
     this.stick = false;
+    if (e.modifiers?.shift || e.modifiers?.platform || e.modifiers?.control) { pick(L, i, e.modifiers, lines); return; }
+    this.drag = pressPick(L, i, lines);
   }
   dragLine(e, lines) {
-    const L = this.log, y = e.local_position?.y;
+    const y = e.local_position?.y;
     if (!this.drag || y === undefined) return false;
     if (y < 0) this.logTop = Math.max(0, this.logTop - 24);
     if (y > this.logH) this.logTop = Math.min(this.lay?.maxTop ?? 0, this.logTop + 24);
-    const i = this.indexAt(Math.max(0, Math.min(this.logH - 1, y)) + this.logTop);
+    const i = indexAt(this.lay, Math.max(0, Math.min(this.logH - 1, y)) + this.logTop);
     if (i < 0) return false;
-    if (i !== this.drag.anchor) this.drag.moved = true;
-    const [lo, hi] = i < this.drag.anchor ? [i, this.drag.anchor] : [this.drag.anchor, i];
-    L.picked = new Set(lines.slice(lo, hi + 1));
+    dragPick(this.log, this.drag, i, lines);
     return true;
   }
   releaseLine() {
-    if (this.drag && !this.drag.moved && this.drag.sole) this.log.picked = new Set();
+    if (this.log) releasePick(this.log, this.drag);
     this.drag = null; this.thumb = null;
   }
 
@@ -1118,10 +987,10 @@ export default class K8s extends View {
       else if (ch === "n") this.step(1);
       else if (ch === "N") this.step(-1);
       else if (ch === "f") L.filterOnly = !L.filterOnly;
-      else if (ch === "e") L.level = L.level === "all" ? "warn" : L.level === "warn" ? "err" : "all";
+      else if (ch === "e") this.setLogOpt("level", nextLevel(L.level));
       else if (ch === " " || ch === "p") this.toggleFollow(cx);
-      else if (ch === "t") L.ts = !L.ts;
-      else if (ch === "w") L.wrap = !L.wrap;
+      else if (ch === "t") this.setLogOpt("ts", !L.ts);
+      else if (ch === "w") this.setLogOpt("wrap", !L.wrap);
       else if (ch === "G" || k === "end") { this.stick = true; }
       else if (ch === "g" || k === "home") { this.stick = false; this.logTop = 0; }
       else if (ch >= "1" && ch <= String(SINCE.length)) this.setSince(SINCE[Number(ch) - 1], cx);
@@ -1151,22 +1020,22 @@ export default class K8s extends View {
     else if (ch >= "1" && ch <= String(KINDS.length)) this.setKind(KINDS[Number(ch) - 1].id, cx);
     else if (ch === "l" || k === "enter") this.open(r, cx);
     else if (ch === "d") this.inspect(r, "describe", cx);
-    else if (ch === "y") { this.panel.tab = "yaml"; this.ensureYaml(); if (!this.panel.open) this.togglePanel(cx); }
-    else if (ch === "o") { this.panel.tab = "overview"; if (!this.panel.open) this.togglePanel(cx); }
-    else if (ch === "v") { this.panel.tab = "events"; if (!this.panel.open) this.togglePanel(cx); }
+    else if (ch === "y") { this.setTab("yaml", cx); if (!this.panel.open) this.togglePanel(cx); }
+    else if (ch === "o") { this.setTab("overview", cx); if (!this.panel.open) this.togglePanel(cx); }
+    else if (ch === "v") { this.setTab("events", cx); if (!this.panel.open) this.togglePanel(cx); }
     else if (ch === "p" || k === "space" || ch === " ") this.togglePanel(cx);
     else if (ch === "s") this.shell(r);
     else if (ch === "R" || ch === "S" || ch === "X") {
       const id = { R: r?.kind === "nodes" ? "cordon" : "restart", S: "scale", X: "delete" }[ch];
       this.actions(r).find(([a]) => a === id)?.[2](cx);
     }
-    else if (ch === "r") this.refresh(cx, true);
+    else if (ch === "r") this.refresh(cx, { force: true });
     else if (ch === "a") this.setAllNs(!this.allNs, cx);
     else if (ch === "/") this.input.focus();
     else if (k === "escape") {
       if (this.showSettings) this.showSettings = false;
       else if (this.panel.open) this.setPanel(false, cx);
-      else if (this.filter) { this.input.set_value(""); this.filter = memo.filter = ""; }
+      else if (this.filter) this.setFilter("", true);
       else this.hide();
     }
     else return;
@@ -1290,7 +1159,7 @@ export default class K8s extends View {
     if (this.at >= rows.length) this.at = Math.max(0, rows.length - 1);
     const tone = { ok: t.ansi2, warn: t.ansi3, bad: t.ansi1, dim: t.dim, plain: t.foreground };
     const busy = [...this.selected].some((c) => this.loading.has(this.keyOf(kind, c)));
-    const errors = [...this.selected].map((c) => [c, this.data[this.keyOf(kind, c)]?.error]).filter(([, e]) => e);
+    const errors = [...this.selected].map((c) => { const d = this.data[this.keyOf(kind, c)]; return [c, d?.error ?? d?.warn]; }).filter(([, e]) => e);
     const ctxColor = (c) => [t.ansi6, t.ansi5, t.ansi4, t.ansi3, t.ansi2, t.ansi1][Math.max(0, this.contexts.indexOf(c)) % 6];
     const cell = (w, text, color) => div().w(w).flex_none().pr(10).truncate().text_color(color ?? t.dim).child(text || "");
     return [
@@ -1308,7 +1177,7 @@ export default class K8s extends View {
         }))
         .child(div().flex_1())
         .when(busy, (el) => el.child(div().text_size(12).text_color(t.dim).frames(SPIN, 90).child("⠋")))
-        .child(this.btn(t, "refresh", "Refresh", (cx) => this.refresh(cx, true), { hotkey: "r", icon: ICONS.refresh }))
+        .child(this.btn(t, "refresh", "Refresh", (cx) => this.refresh(cx, { force: true }), { hotkey: "r", icon: ICONS.refresh }))
         .child(this.settingsPopup(t, ctxColor))
         .child(this.windowButtons(t)),
 
@@ -1329,7 +1198,7 @@ export default class K8s extends View {
         .children(kind.cols.map(([n, w]) => cell(w, n))).child(cell(50, "AGE"))).child(
       div().id("list-area").flex_1().min_h(0).relative().font_family(mono).text_size(12)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .child(v_virtual_list("k8s-rows", rows.length, 24, (i) => `${rows[i].ctx}|${rows[i].ns}|${rows[i].name}`, (range) =>
+        .child(v_virtual_list("k8s-rows", rows.length, 24, (i) => rowKey(rows[i]), (range) =>
           rows.slice(range.start, range.end).map((r, j) => {
             const i = range.start + j, sel = i === this.at;
             return h_flex().h(24).px(12).items_center().when(sel, (el) => el.bg(t.selected)).when(!sel && i % 2, (el) => el.bg(t.surface))
@@ -1342,7 +1211,7 @@ export default class K8s extends View {
               .child(cell(50, r.age, t.dim));
           })).track_scroll(this.scroll).size_full()
           .on_item_click((key, cx) => {
-            const rows = this.rows(), idx = rows.findIndex((r) => `${r.ctx}|${r.ns}|${r.name}` === key);
+            const rows = this.rows(), idx = rows.findIndex((r) => rowKey(r) === key);
             if (idx >= 0) {
               // One click: select it and show the panel. The same row again: hide the
               // panel. Twice quickly: its logs (the panel is left as it was).
@@ -1351,7 +1220,7 @@ export default class K8s extends View {
               if (double) { this.panel.open = this.panelBefore; this.open(rows[idx], cx); }
               else {
                 this.panelBefore = this.panel.open;
-                this.at = idx;
+                this.select(idx);
                 this.setPanel(same ? !this.panel.open : true, cx);
               }
             }
@@ -1371,38 +1240,24 @@ export default class K8s extends View {
 
   renderLogs(t, mono) {
     const L = this.log;
-    const sp = this.savedPref;
-    if (!sp || sp.since !== L.since || sp.ts !== L.ts || sp.wrap !== L.wrap || sp.level !== L.level) {
-      this.savedPref = { since: L.since, ts: L.ts, wrap: L.wrap, level: L.level };
-      save("logPrefs", this.savedPref);
-    }
-    const { lines, matches, q, key: linesKey } = this.visibleLines();
+    const { lines, matches, q, key: linesKey } = visibleLines(L);
     const pods = Object.entries(L.pods);
     const showPod = pods.length > 1 || L.kind !== "pods";
     const width = this.size?.width ?? 1200;
     const prefixW = (L.ts ? 100 : 0) + (showPod ? 64 : 0) + 30;
     const cols = Math.max(20, Math.floor((width - prefixW) / CHAR_W));
-    const lay = this.lay = this.layout(lines, linesKey, cols, L.wrap);
-    const longWord = new RegExp(`.{1,${cols - 2}}`, "g");
+    const lay = this.lay = layout(L, lines, linesKey, cols, L.wrap, this.logH);
     const active = L.match >= 0 ? matches[L.match] : -1;
     const lvColor = { err: t.ansi1, warn: t.ansi3, debug: t.dim, info: t.foreground };
     const short = (p) => p.split("-").pop();
 
+    // The pieces of a line are cached on it (see lineParts); only the divs are made here.
+    const themeKey = [t.ansi1, t.ansi2, t.ansi3, t.ansi4, t.ansi5, t.ansi6, t.dim, t.foreground].join();
+    const po = { t, themeKey, q, cols, wrap: L.wrap, colors: lvColor };
     const row = (l, i) => {
-      const words = [];
-      // Colours are worked out once per line (and theme), not on every scroll.
-      if (l.tokTheme !== t.ansi3) { l.tok = tokens(l.text, t); l.tokTheme = t.ansi3; }
-      for (const [s, c, hl] of highlight(l.tok, q)) {
-        // Wrap at spaces, and cut words longer than a line so they wrap too
-        // (an unbroken JSON blob would otherwise be clipped and leave a gap).
-        const parts = L.wrap ? s.split(/(?<= )/).flatMap((w) => (w.length > cols - 2 ? w.match(longWord) : [w])) : [s];
-        for (const p of parts) {
-          if (!p) continue;
-          words.push(div().flex_none().text_color(c ?? lvColor[l.level])
-            .when(hl, (el) => el.bg(i === active ? t.accent : t.ansi3 + "55").when(i === active, (e) => e.text_color(t.accent_foreground)))
-            .child(p.replaceAll(" ", " ")));
-        }
-      }
+      const words = lineParts(l, po).map(([p, c, hl]) => div().flex_none().text_color(c)
+        .when(hl, (el) => el.bg(i === active ? t.accent : t.ansi3 + "55").when(i === active, (e) => e.text_color(t.accent_foreground)))
+        .child(p));
       return h_flex().w_full().h(lay.heights[i]).overflow_hidden().items_start().pl(10).pr(12).gap(8).border_l(2)
         .border_color(l.level === "err" ? t.ansi1 : l.level === "warn" ? t.ansi3 + "aa" : "#00000000")
         .when(l.level === "err", (el) => el.bg(t.ansi1 + "14"))
@@ -1419,7 +1274,7 @@ export default class K8s extends View {
         .child(div().font_semibold().child(`${titleKind}/${L.name}`))
         .child(div().text_size(12).text_color(t.dim).child(`${L.ctx} · ${L.ns}`))
         .child(div().flex_1())
-        .when(L.busy, (el) => el.child(div().text_size(12).text_color(t.dim).frames(SPIN, 90).child("⠋")))
+        .when(!L.loaded, (el) => el.child(div().text_size(12).text_color(t.dim).frames(SPIN, 90).child("⠋")))
         .child(div().text_size(12).text_color(L.follow && !L.previous ? t.ansi2 : t.dim).child(lbl(L.previous ? "previous container" : L.follow ? `${ICONS.live} live` : `${ICONS.pause} paused`)))
         .child(this.windowButtons(t)),
       h_flex().flex_none().flex_wrap().px(12).pb(6).gap(4).items_center()
@@ -1427,9 +1282,9 @@ export default class K8s extends View {
         .child(div().w(10))
         .child(this.chip(t, "follow", L.follow ? `${ICONS.pause} pause` : `${ICONS.follow} follow`, false, (cx) => this.toggleFollow(cx)))
         .when(L.kind === "pods", (el) => el.child(this.chip(t, "prev", "previous", L.previous, (cx) => { L.previous = !L.previous; this.reload(cx); })))
-        .child(this.chip(t, "ts", "time", L.ts, () => { L.ts = !L.ts; }))
-        .child(this.chip(t, "wrap", "wrap", L.wrap, () => { L.wrap = !L.wrap; }))
-        .child(this.chip(t, "level", LEVELS[L.level], L.level !== "all", () => { L.level = L.level === "all" ? "warn" : L.level === "warn" ? "err" : "all"; }, L.level === "err" ? t.ansi1 : t.ansi3))
+        .child(this.chip(t, "ts", "time", L.ts, () => this.setLogOpt("ts", !L.ts)))
+        .child(this.chip(t, "wrap", "wrap", L.wrap, () => this.setLogOpt("wrap", !L.wrap)))
+        .child(this.chip(t, "level", LEVELS[L.level], L.level !== "all", () => this.setLogOpt("level", nextLevel(L.level)), L.level === "err" ? t.ansi1 : t.ansi3))
         .child(this.chip(t, "clear", "clear", false, () => { L.lines = []; L.version++; })),
       h_flex().flex_none().px(12).pb(8).gap(6).items_center().border_b(1).border_color(t.border)
         .child(this.inputBox(t, "log-search", this.search, this.typing === "search", 200))
@@ -1483,7 +1338,7 @@ export default class K8s extends View {
           if (this.stick) this.logTop = lay.maxTop;
           this.logTop = Math.max(0, Math.min(lay.maxTop, this.logTop));
           const out = [];
-          for (let i = Math.max(0, this.indexAt(this.logTop)); i < lay.n && lay.tops[i] < this.logTop + this.logH; i++)
+          for (let i = Math.max(0, indexAt(lay, this.logTop)); i < lay.n && lay.tops[i] < this.logTop + this.logH; i++)
             out.push(row(lines[i], i).absolute().left(0).right(0).top(lay.tops[i] - this.logTop));
           if (lay.total > this.logH) {
             const h = Math.max(24, (this.logH * this.logH) / lay.total), top = lay.maxTop ? (this.logTop / lay.maxTop) * (this.logH - h) : 0;
@@ -1493,7 +1348,7 @@ export default class K8s extends View {
           return out;
         })())
         .when(!lines.length, (el) => el.child(div().absolute().top(10).left(12).text_color(t.dim)
-          .child(L.busy && !L.loaded ? "Loading logs…" : L.lines.length ? "No line matches" : "No logs in this range")))
+          .child(!L.loaded ? "Loading logs…" : L.lines.length ? "No line matches" : "No logs in this range")))
         .when(!this.stick && L.follow, (el) => el.child(div().id("to-bottom").absolute().bottom(10).right(20).px(10).py(4).rounded(12)
           .bg(t.solid).text_color(t.solid_foreground).text_size(12).cursor_pointer()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())

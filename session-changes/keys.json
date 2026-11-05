@@ -1,0 +1,5 @@
+{
+  "global": {
+    "cmd-e": "mod.open:session-changes"
+  }
+}

@@ -1,6 +1,6 @@
 # Claude goal
 
-Writes a `/goal` line for the Claude Code session in your focused terminal, in the [Herdr](https://herdr.dev) desktop app. Press `cmd-shift-g`, pick a goal, and it is pasted into the Claude Code prompt for you to review and send.
+Write the next `/goal` for the Claude Code session you're in. Press `cmd-shift-g`; the goal is pasted into the prompt for you to send.
 
 ![Claude goal](preview.png)
 

@@ -14,14 +14,43 @@ const SCOPES = [
   { id: "folder", label: "This space" },
 ];
 const ROW_H = 50;
+const SEARCH_LIMIT = 200;
 // Brand colors: Claude terracotta, Codex blue.
 const AGENT_COLORS = { claude: "#D97757", codex: "#6E8BFF" };
-const HIT_START = "";
-const HIT_END = "";
 
 const scopeOf = () => SCOPES.find((s) => s.id === shared("agent-history.scope")) ?? SCOPES[0];
 const norm = (p) => String(p || "").replace(/\/+$/, "");
+// One folder predicate for the scope filter, and for picking a space on Resume.
+const under = (cwd, folder) => cwd === folder || cwd.startsWith(folder + "/");
+const folderOf = (cwd) => norm(cwd).split("/").pop() || cwd || "";
+// The command that resumes a session; index.py sends agent/id/path only.
+const argvFor = (s) =>
+  s.agent === "claude" ? ["claude", "--resume", s.id]
+  : s.agent === "codex" ? ["codex", "resume", s.id]
+  : ["pi", "--session", s.path];
+// Rows from index.py plus what the UI derives from them.
+const prepare = (rows) => (rows || []).map((s) => ({ ...s, folder: folderOf(s.cwd), argv: argvFor(s) }));
 const shellQuote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
+
+// The folders a space works in: its own folder plus its live terminals' cwds.
+function spaceFolders(sp, livePanes) {
+  const tabs = new Set((sp.tabs || []).map((t) => t.id));
+  const live = livePanes.filter((p) => p.terminal && tabs.has(p.tab) && p.cwd).map((p) => norm(p.cwd));
+  // A space recorded at the home folder would claim every session under it; its terminals say more.
+  const recorded = norm(sp.folder);
+  const out = recorded && !(recorded === norm(home()) && live.length) ? [recorded, ...live] : live;
+  return [...new Set(out.filter(Boolean))];
+}
+const activeFolders = () => {
+  const active = spaces().find((sp) => sp.active);
+  return active ? spaceFolders(active, panes()) : [];
+};
+const folderScope = () => scopeOf().id === "folder";
+const emptyScope = () => folderScope() && activeFolders().length === 0;
+// --cwd args for index.py; nothing for "All".
+const scopeArgs = () => (folderScope() ? activeFolders().flatMap((f) => ["--cwd", f]) : []);
+// Identifies what recent/results were loaded for, so a change reloads them.
+const scopeKey = () => (folderScope() ? "folder\n" + [...activeFolders()].sort().join("\n") : "all");
 
 function age(ms) {
   const m = Math.floor((Date.now() - ms) / 60000);
@@ -43,7 +72,7 @@ export default class SessionHistory extends View {
   init(_props, cx) {
     this.input = InputState.new({ placeholder: "Search sessions: titles, prompts, replies, tool output…" });
     this.input.on("change", (_e, cx) => this.queryChanged(cx));
-    this.input.on("submit", () => this.resume(this.visible()[this.at]));
+    this.input.on("submit", () => this.resume(this.shown[this.at]));
     this.input.focus();
     this.handle = cx.focus_handle();
     this.scroll = VirtualListScrollHandle.new();
@@ -51,9 +80,16 @@ export default class SessionHistory extends View {
     this.recent = [];
     this.results = null; // null = no query, show recent
     this.at = 0;
+    this.selPath = null; // the row the user picked (arrows/click); follows it across re-sorts
+    this.key = scopeKey(); // the scope (and folders) that recent/results were loaded for
     this.error = null;
     this.indexing = null;
+    this.capped = false;
     this.searching = false;
+    this.pendingSearch = false; // a debounced search is waiting: update() must not race it
+    this.wantMore = false; // the first index run catches up in slices, one per tick
+    this.lastKick = 0;
+    this.shown = [];
     this.token = 0;
     this.confirmDelete = null;
     this.closed = false;
@@ -62,7 +98,11 @@ export default class SessionHistory extends View {
     // Timers only from init/handlers (QuickJS), kept so close() can stop them.
     this.tasks = [
       cx.timer.after(600, () => this.input.focus()),
-      cx.timer.every(15000, (cx) => this.kick(cx)),
+      // One timer drives indexing: 15 s between slices when idle, every second while catching up.
+      cx.timer.every(1000, (cx) => {
+        if (scopeKey() !== this.key) this.rescope(cx); // the space's folders changed under us
+        if (Date.now() - this.lastKick >= 15000 || this.wantMore) this.kick(cx);
+      }),
     ];
     this.loadRecent(cx);
     this.kick(cx);
@@ -79,57 +119,93 @@ export default class SessionHistory extends View {
     for (const x of [this.scroll, this.input, this.handle]) x?.release?.();
   }
 
-  // Index new/changed transcripts; the first run catches up in 8 s slices.
+  // One index slice (8 s budget) per call; the init timer calls again for the next one.
+  // update() returns the recent list when anything changed, so no second python run is needed.
   kick(cx) {
     if (this.busy || this.closed) return;
     this.busy = true;
+    this.lastKick = Date.now();
     cx.spawn(async (cx) => {
-      do await this.update(cx); while (this.indexing && !this.closed);
-      this.busy = false;
+      try {
+        await this.update(cx);
+      } finally {
+        this.busy = false;
+      }
     });
   }
 
   async update(cx) {
     try {
-      const r = await index(["update", "--budget", "8"]);
+      const key = this.key;
+      const r = await index(["update", "--budget", "8", "--limit", "300", ...scopeArgs()]);
+      if (this.closed) return;
+      this.error = null;
+      if (r.busy) return cx.notify(); // another window holds the lock: keep what we knew
       this.indexing = r.pending > 0 ? r.pending : null;
-      if (r.indexed > 0) {
-        await this.fetchRecent(cx);
-        if (this.query) await this.search(cx, this.token);
+      this.wantMore = r.pending > 0;
+      if (r.recent && key === this.key && !emptyScope()) {
+        this.recent = prepare(r.recent);
+        // Rerun the query only on a change, and not while a debounced search is about to.
+        if (this.query && !this.pendingSearch) await this.search(cx, ++this.token);
       }
     } catch (e) {
+      this.wantMore = false; // back off to the 15 s cadence instead of respawning python
       this.error = String(e.message || e);
-      cx.notify();
     }
+    cx.notify();
   }
 
+  // First paint; later update() sends the list only when something changed.
   loadRecent(cx) {
-    cx.spawn((cx) => this.fetchRecent(cx));
+    const key = this.key;
+    if (emptyScope()) { this.recent = []; return; }
+    cx.spawn(async (cx) => {
+      try {
+        const r = await index(["search", "", "--limit", "300", ...scopeArgs()]);
+        if (!this.closed && key === this.key && !this.recent.length) this.recent = prepare(r.results);
+        this.error = null;
+      } catch (e) {
+        this.error = String(e.message || e);
+      }
+      if (!this.closed) cx.notify();
+    });
   }
 
-  async fetchRecent(cx) {
-    try {
-      const r = await index(["search", "", "--limit", "300"]);
-      this.recent = r.results || [];
-      this.error = null;
-    } catch (e) {
-      this.error = String(e.message || e);
-    }
+  // The scope or the space's folders changed: what we hold is for another scope, load again.
+  rescope(cx) {
+    this.key = scopeKey();
+    this.token++;
+    this.recent = [];
+    this.results = this.query ? [] : null;
+    this.capped = false;
+    this.at = 0;
+    this.selPath = null;
+    this.confirmDelete = null;
+    this.debounce?.cancel(); // a waiting typed search is replaced by this one (the token moved on)
+    this.pendingSearch = false;
+    this.loadRecent(cx);
+    if (this.query) cx.spawn((cx) => this.search(cx, this.token));
     cx.notify();
   }
 
   queryChanged(cx) {
     this.query = this.input.value().trim();
     this.at = 0;
+    this.selPath = null;
     this.confirmDelete = null;
     const token = ++this.token;
+    this.debounce?.cancel();
     if (!this.query) {
       this.results = null;
+      this.capped = false;
+      this.searching = false;
+      this.pendingSearch = false;
       cx.notify();
       return;
     }
-    this.debounce?.cancel();
+    this.pendingSearch = true;
     this.debounce = cx.timer.after(180, (cx) => {
+      this.pendingSearch = false;
       if (token === this.token) cx.spawn((cx) => this.search(cx, token));
     });
   }
@@ -138,38 +214,23 @@ export default class SessionHistory extends View {
     this.searching = true;
     cx.notify();
     try {
-      const r = await index(["search", this.query, "--limit", "200"]);
+      const r = emptyScope() ? { results: [] } : await index(["search", this.query, "--limit", String(SEARCH_LIMIT), ...scopeArgs()]);
       if (token !== this.token) return;
-      this.results = r.results || [];
+      this.results = prepare(r.results);
+      this.capped = Boolean(r.capped);
       this.error = null;
     } catch (e) {
       if (token !== this.token) return;
       this.error = String(e.message || e);
+    } finally {
+      if (token === this.token) this.searching = false; // a stale search leaves the newer one's flag alone
+      if (!this.closed) cx.notify();
     }
-    this.searching = false;
-    cx.notify();
   }
 
-  // Folders the active space works in: its live terminals' cwds.
-  activeFolders() {
-    const active = spaces().find((s) => s.active);
-    const out = new Set();
-    if (!active) return out;
-    const tabIds = new Set((active.tabs || []).map((t) => t.id));
-    for (const p of panes()) if (p.terminal && tabIds.has(p.tab) && p.cwd) out.add(norm(p.cwd));
-    if (active.folder) out.add(norm(active.folder));
-    return out;
-  }
-
+  // Already scoped by index.py; the list is the whole truth.
   visible() {
-    const list = this.results ?? this.recent;
-    if (scopeOf().id !== "folder") return list;
-    const folders = this.activeFolders();
-    return list.filter((s) => {
-      const c = norm(s.cwd);
-      for (const f of folders) if (c === f || c.startsWith(f + "/")) return true;
-      return false;
-    });
+    return this.results ?? this.recent;
   }
 
   resume(s) {
@@ -177,7 +238,11 @@ export default class SessionHistory extends View {
     const folder = s.cwd || home();
     const name = s.title || s.folder || s.agent;
     // Several spaces can share a folder: the one you are in wins, else the first that matches.
-    const matches = spaces().filter((sp) => !sp.machine && norm(sp.folder) === norm(folder));
+    // A space is where its terminals are now, not only the folder it was made in; the same
+    // predicate as the "This space" filter (the session's folder is at or under one of them).
+    const target = norm(folder);
+    const livePanes = panes();
+    const matches = spaces().filter((sp) => !sp.machine && spaceFolders(sp, livePanes).some((f) => under(target, f)));
     const existing = matches.find((sp) => sp.active) ?? matches[0];
     if (existing) {
       run("tab.new", { name, space: existing.id, folder, argv: s.argv });
@@ -221,6 +286,7 @@ export default class SessionHistory extends View {
   move(by, n) {
     if (!n) return;
     this.at = Math.max(0, Math.min(n - 1, this.at + by));
+    this.selPath = this.shown[this.at]?.path ?? null;
     this.confirmDelete = null;
     this.scroll.scroll_to_item(this.at);
   }
@@ -231,23 +297,19 @@ export default class SessionHistory extends View {
       .bg(color + "22").text_color(color).text_size(9.5).font_bold().child(agent.toUpperCase());
   }
 
-  // Snippet with the hit highlighted; keeps the hit on screen by trimming the lead-in.
-  snippet(t, text) {
-    const i = text.indexOf(HIT_START);
-    const j = text.indexOf(HIT_END);
-    if (i < 0 || j < i) return div().flex_1().min_w(0).truncate().text_color(t.muted).child(text);
-    let pre = text.slice(0, i);
-    if (pre.length > 48) pre = "…" + pre.slice(-47);
+  // Snippet {pre, hit, post} from index.py; the lead-in is already trimmed so the hit stays on screen.
+  snippet(t, snip) {
+    if (!snip.hit) return div().flex_1().min_w(0).truncate().text_color(t.muted).child(snip.pre);
     return h_flex().flex_1().min_w(0).overflow_hidden().text_color(t.muted)
-      .child(div().flex_none().child(pre))
-      .child(div().flex_none().px(1).rounded(3).bg(t.accent + "33").text_color(t.foreground).font_semibold().child(text.slice(i + 1, j)))
-      .child(div().flex_1().min_w(0).truncate().child(text.slice(j + 1)));
+      .child(div().flex_none().child(snip.pre))
+      .child(div().flex_none().px(1).rounded(3).bg(t.accent + "33").text_color(t.foreground).font_semibold().child(snip.hit))
+      .child(div().flex_1().min_w(0).truncate().child(snip.post));
   }
 
   row(t, s, i) {
     const sel = i === this.at;
     const title = s.title || s.preview || s.id;
-    const second = this.results && s.snippet ? s.snippet : s.title ? s.preview : "";
+    const second = this.results && s.snippet ? s.snippet : { pre: s.title ? s.preview : "", hit: "", post: "" };
     return v_flex().h(ROW_H).px(10).py(7).gap(4).rounded(8).cursor_pointer()
       .when(sel, (el) => el.bg(t.selected))
       .when(!sel, (el) => el.hover((el) => el.bg(t.hover)))
@@ -256,7 +318,7 @@ export default class SessionHistory extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(12.5).text_color(t.foreground).child(title))
         .child(div().flex_none().text_size(10.5).text_color(t.dim).child(s.folder || ""))
         .child(div().flex_none().w(30).text_size(10.5).text_color(t.dim).child(age(s.mtime))))
-      .child(h_flex().pl(56).text_size(11).min_w(0).child(this.snippet(t, second || "")));
+      .child(h_flex().pl(56).text_size(11).min_w(0).child(this.snippet(t, second)));
   }
 
   button(t, id, label, onClick, opts = {}) {
@@ -270,12 +332,15 @@ export default class SessionHistory extends View {
 
   render(cx) {
     const t = theme();
-    const list = this.visible();
-    if (this.at >= list.length) this.at = Math.max(0, list.length - 1);
+    const list = (this.shown = this.visible()); // once per render; the submit handler reads this.shown
+    // A row the user picked stays selected when a background update re-sorts the list.
+    const kept = this.selPath ? list.findIndex((s) => s.path === this.selPath) : -1;
+    this.at = kept >= 0 ? kept : Math.min(this.at, Math.max(0, list.length - 1));
+    if (this.selPath && kept < 0) this.selPath = list[this.at]?.path ?? null; // it vanished: the clamped row
     const sel = list[this.at];
     const scope = scopeOf();
     const status = this.error
-      ?? (this.indexing ? `Indexing… ${this.indexing} left` : this.searching ? "Searching…" : `${list.length}${this.results ? " matches" : " sessions"}`);
+      ?? (this.indexing ? `Indexing… ${this.indexing} left` : this.searching ? "Searching…" : `${list.length}${this.results ? (this.capped ? "+ matches" : " matches") : " sessions"}`);
 
     return v_flex()
       .id("agent-history")
@@ -287,7 +352,7 @@ export default class SessionHistory extends View {
       .bg(t.popover)
       .text_size(13)
       .on_key_down((e, cx) => {
-        const k = e.key;
+        const k = e.keystroke;
         if (k === "escape") return this.dismiss();
         if (k === "down") this.move(1, list.length);
         else if (k === "up") this.move(-1, list.length);
@@ -303,7 +368,7 @@ export default class SessionHistory extends View {
         .children(SCOPES.map((s) => div().id(`scope-${s.id}`).px(8).h(22).rounded(6).flex().items_center().cursor_pointer().text_size(11)
           .when(scope.id === s.id, (el) => el.bg(t.selected).text_color(t.foreground))
           .when(scope.id !== s.id, (el) => el.text_color(t.dim).hover((el) => el.bg(t.hover)))
-          .on_click((_e, cx) => { setShared("agent-history.scope", s.id); this.at = 0; cx.notify(); })
+          .on_click((_e, cx) => { setShared("agent-history.scope", s.id); this.rescope(cx); })
           .child(s.label))))
       .child(h_flex().h(36).flex_none().px(10).gap(8).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
         .child(svg("mods/workspace-chrome/search.svg").size(15).text_color(t.dim))
@@ -319,8 +384,10 @@ export default class SessionHistory extends View {
             .size_full()
             .on_item_click((key, cx) => {
               const i = list.findIndex((s) => s.path === key);
+              if (i < 0) return;
               if (i === this.at) return this.resume(list[i]);
               this.at = i;
+              this.selPath = key;
               this.confirmDelete = null;
               cx.notify();
             }))

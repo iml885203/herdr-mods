@@ -7,6 +7,7 @@ Add-ons for the [Herdr](https://herdr.dev) desktop app.
 | [Kubernetes](kubernetes/) | Browse pods, deployments and logs across clusters. `cmd-k` |
 | [Agent History](agent-history/) | Search every past Claude Code / Codex session by what was said, and resume it. `cmd-y` |
 | [Claude goal](claude-goal/) | Write the next `/goal` for the Claude Code session in front of you. `cmd-shift-g` |
+| [Session changes](session-changes/) | What a Claude Code session changed across every repo it touched, from an AI overview down to the diff. `cmd-e` |
 | [Smart close](smart-close/) | `cmd-w` closes the pane you're in; the tab goes only with its last pane. |
 | [Orbit](https://github.com/iml885203/orbit/tree/main/integrations/herdr-app) | Your local Orbit environments: services, logs, traces. `cmd-o` (lives in the Orbit repo) |
 
