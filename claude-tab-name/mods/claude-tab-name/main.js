@@ -3,13 +3,14 @@
 // rename popup that F2 opens, which renames the tab and types `/rename` into its Claude.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, run, hc, exec, home, props, closeOverlay, notify, theme } from "herdr";
+import { spaces, panes, focused, run, hc, exec, home, props, closeOverlay, notify, theme, watchFolder } from "herdr";
 import * as fs from "fs/promises";
 import { APP, readSession, cleanName, claudeOf, renames, decide, probeResult, settled, PROBE_KEY } from "./logic.js";
 
 const MOD = "claude-tab-name";
-const TICK_MS = 2000;
+const TICK_MS = 15000; // a fallback: the folder watch below brings changes at once
 const PID_TTL_MS = 30000; // look again now and then: a crashed Claude can leave its file behind
+const MISS_MS = 2000; // a pane with no matching session is asked again at most this often
 const DRAFT = "Claude's prompt has unsent text";
 const SESSIONS = () => `${home()}/.claude/sessions`;
 
@@ -72,8 +73,26 @@ export default class ClaudeTabName extends View {
     this.synced = new Map(); // terminal -> the session name (and when it was set) the tab last followed
     this.pids = new Map(); // terminal -> {pid, at}: Claude's pid (the terminal's foreground program)
     this.busy = false;
-    this.tasks.push(cx.timer.every(TICK_MS, () => this.tick()));
+    this.again = false; // a change came in during a run: run once more after it
+    this.tasks.push(cx.timer.every(TICK_MS, (cx) => { this.tick(); this.watch(cx); }));
+    this.watching = false;
     this.tick();
+    this.watch(cx);
+  }
+
+  // Claude Code rewrites a session's file when its name (or status) changes. A watch that
+  // fails (no folder before the first Claude run) is started again by the fallback timer.
+  watch(cx) {
+    if (this.watching || this.closed) return;
+    this.watching = true;
+    cx.spawn(async () => {
+      try {
+        while (!this.closed) {
+          await watchFolder(SESSIONS());
+          if (!this.closed) this.tick();
+        }
+      } catch {} finally { this.watching = false; }
+    });
   }
 
   async close() {
@@ -85,8 +104,10 @@ export default class ClaudeTabName extends View {
   // ---- sync copy ----
 
   async tick() {
-    if (this.busy || this.closed) return;
+    if (this.closed) return;
+    if (this.busy) { this.again = true; return; }
     this.busy = true;
+    this.again = false;
     try {
       const tabs = localTabs();
       const claudes = panes().filter((p) => p.app === APP && p.terminal && tabs.has(p.tab));
@@ -96,7 +117,8 @@ export default class ClaudeTabName extends View {
       const now = Date.now();
       for (const p of claudes) {
         const known = this.pids.get(p.terminal);
-        if (known && known.pid !== null && live.has(known.pid) && now - known.at < PID_TTL_MS) continue;
+        const fresh = known && known.pid !== null && live.has(known.pid) && now - known.at < PID_TTL_MS;
+        if (fresh || (known && now - known.at < MISS_MS)) continue; // a miss isn't asked again on every event
         this.pids.set(p.terminal, { pid: await this.pidOf(p.terminal), at: now });
       }
       if (this.closed) return;
@@ -105,6 +127,7 @@ export default class ClaudeTabName extends View {
       console.log(`${MOD}: ${e?.message ?? e}`);
     } finally {
       this.busy = false;
+      if (this.again && !this.closed) this.tick();
     }
   }
 
@@ -134,10 +157,15 @@ export default class ClaudeTabName extends View {
 
   // ---- rename popup (F2) ----
 
+  // `props().tab`: the tab to rename (a tab bar opens this with the tab you double-clicked);
+  // without it, the focused tab.
   initPopup(cx) {
     const f = focused();
-    this.tab = f ? localTabs().get(f.tab) ?? null : null;
-    this.claude = this.tab ? claudeOf(panes(), this.tab.id, f.terminal) : null;
+    const tabs = localTabs();
+    const want = props()?.tab;
+    this.missing = want != null && !tabs.has(want); // asked for a tab that's gone (or on another machine)
+    this.tab = (want != null ? tabs.get(want) : f && tabs.get(f.tab)) ?? null;
+    this.claude = this.tab ? claudeOf(panes(), this.tab.id, f?.tab === this.tab.id ? f.terminal : null) : null;
     this.input = InputState.new({ placeholder: this.tab ? `Tab ${this.tab.index}` : "Name", value: this.tab?.named ? this.tab.name : "" });
     this.input.on("submit", (_e, cx) => this.apply(cx));
     this.input.focus();
@@ -171,7 +199,7 @@ export default class ClaudeTabName extends View {
   render() {
     const t = theme();
     if (!props()?.overlay) return div();
-    const note = !this.tab ? "No tab is focused."
+    const note = this.missing ? "That tab is gone." : !this.tab ? "No tab is focused."
       : this.applying ? "Renaming the Claude session…"
       : this.claude ? "Its Claude session gets the name too."
       : "No Claude in this tab: the tab only.";
