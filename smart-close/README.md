@@ -16,13 +16,11 @@
 
 ## Install
 
-Copy `mods/smart-close` into `~/.config/herdr-app/mods/` and merge `keys.json` into your own:
+Tell your Herdr agent:
 
-```json
-{ "global": { "cmd-w": "mod.open:smart-close" } }
-```
+> Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/iml885203/herdr-mods/tree/main/smart-close
 
-Then run `herdr-app check mods/smart-close`. Or tell your Herdr agent to add `herdr.dev/mods/iml885203/herdr-mods--smart-close`.
+By hand: copy `mods/smart-close` into `~/.config/herdr-app/mods/`, merge this folder's `keys.json` into your own, then run `herdr-app check mods/smart-close`.
 
 ## Keys
 

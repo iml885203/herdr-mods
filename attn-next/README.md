@@ -19,19 +19,11 @@ Hold `cmd-shift`, tap `J`: every agent, the ones that need you first. Let go to 
 
 ## Install
 
-Copy `mods/attn-next` into `~/.config/herdr-app/mods/` and merge `keys.json` into your own. Both sections are needed:
+Tell your Herdr agent:
 
-```json
-{
-  "global": { "cmd-shift-j": "mod.open:attn-next" },
-  "mod:attn-next": {
-    "cmd-shift-j": "attn-next.next",
-    "cmd-shift-k": "attn-next.prev"
-  }
-}
-```
+> Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/iml885203/herdr-mods/tree/main/attn-next
 
-Then run `herdr-app check mods/attn-next`. Or tell your Herdr agent to add `herdr.dev/mods/iml885203/herdr-mods--attn-next`.
+By hand: copy `mods/attn-next` into `~/.config/herdr-app/mods/`, merge this folder's `keys.json` into your own, then run `herdr-app check mods/attn-next`.
 
 ## Keys
 

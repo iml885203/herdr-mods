@@ -20,18 +20,18 @@ A tab and its Claude Code session keep the same name: `/rename` in Claude rename
 
 ## Install
 
-1. Copy `mods/claude-tab-name` into `~/.config/herdr-app/mods/`.
-2. Merge `keys.json` into your own: `{ "global": { "f2": "mod.open:claude-tab-name" } }`.
-3. Add a 0 px block to your layout (a personal one: clone a shipped layout first), anywhere in its tree:
+Tell your Herdr agent:
 
-   ```json
-   { "id": "claude-tab-name", "type": "block", "size": { "px": 0 }, "content": { "mod": "claude-tab-name" } }
-   ```
+> Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/iml885203/herdr-mods/tree/main/claude-tab-name
 
-   This copy does the `/rename` → tab part. Don't mark it `"hidden": true`: a hidden block never starts its mod.
-4. Run `herdr-app check ~/.config/herdr-app/mods/claude-tab-name`.
+By hand: copy `mods/claude-tab-name` into `~/.config/herdr-app/mods/`, merge this folder's `keys.json` into your own, then run `herdr-app check mods/claude-tab-name`. Also add a 0 px block to a personal layout so `/rename` follows the tab:
 
-Or tell your Herdr agent to add `herdr.dev/mods/iml885203/herdr-mods--claude-tab-name`.
+```json
+{ "id": "claude-tab-name", "type": "block", "size": { "px": 0 }, "content": { "mod": "claude-tab-name" } }
+```
+
+Don't mark it `"hidden": true`: a hidden block never starts its mod.
+
 
 ## Double-click in your tab bar
 

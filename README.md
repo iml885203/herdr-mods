@@ -25,9 +25,9 @@ Add-ons for the [Herdr](https://herdr.dev) desktop app.
 
 Ask the agent in your Herdr app:
 
-> Add herdr.dev/mods/iml885203/herdr-mods--kubernetes
+> Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/iml885203/herdr-mods/tree/main/kubernetes
 
-That's it. To install by hand, see the mod's own README.
+Swap `kubernetes` for any folder above. To install by hand, see the mod's own README.
 
 ## Contributing a mod
 

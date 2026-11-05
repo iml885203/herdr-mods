@@ -22,13 +22,11 @@ Search every past Claude Code and Codex session by what was said, then resume it
 
 ## Install
 
-Copy `mods/agent-history` into `~/.config/herdr-app/mods/` (keep the folder name `agent-history`: the mod finds `index.py` by that path) and merge `keys.json` into your own:
+Tell your Herdr agent:
 
-```json
-{ "global": { "cmd-y": "mod.open:agent-history" } }
-```
+> Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/iml885203/herdr-mods/tree/main/agent-history
 
-Then run `herdr-app check mods/agent-history`. Or tell your Herdr agent to add `herdr.dev/mods/iml885203/herdr-mods--agent-history`.
+By hand: copy `mods/agent-history` into `~/.config/herdr-app/mods/`, merge this folder's `keys.json` into your own, then run `herdr-app check mods/agent-history`.
 
 ## Keys
 

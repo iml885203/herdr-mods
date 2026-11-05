@@ -20,13 +20,11 @@ Write the next `/goal` for the Claude Code session you're in. Press `cmd-shift-g
 
 ## Install
 
-Copy `mods/claude-goal` into `~/.config/herdr-app/mods/` and merge `keys.json` into your own:
+Tell your Herdr agent:
 
-```json
-{ "global": { "cmd-shift-g": "mod.open:claude-goal" } }
-```
+> Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/iml885203/herdr-mods/tree/main/claude-goal
 
-Then run `herdr-app check mods/claude-goal`. Or tell your Herdr agent to add `herdr.dev/mods/iml885203/herdr-mods--claude-goal`.
+By hand: copy `mods/claude-goal` into `~/.config/herdr-app/mods/`, merge this folder's `keys.json` into your own, then run `herdr-app check mods/claude-goal`.
 
 ## Keys
 

@@ -24,13 +24,11 @@ Browse pods, deployments and logs across several Kubernetes clusters in one [Her
 
 ## Install
 
-Copy `mods/kubernetes` into `~/.config/herdr-app/mods/` (keep the folder name `kubernetes`: the mod finds its proxy script by that path) and merge `keys.json` into your own:
+Tell your Herdr agent:
 
-```json
-{ "global": { "cmd-k": "mod.open:kubernetes" } }
-```
+> Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/iml885203/herdr-mods/tree/main/kubernetes
 
-Then run `herdr-app check mods/kubernetes`. Or tell your Herdr agent to add `herdr.dev/mods/iml885203/herdr-mods--kubernetes`.
+By hand: copy `mods/kubernetes` into `~/.config/herdr-app/mods/`, merge this folder's `keys.json` into your own, then run `herdr-app check mods/kubernetes`.
 
 ## Keys
 

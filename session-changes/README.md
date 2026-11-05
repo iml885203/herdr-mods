@@ -35,13 +35,11 @@ See what a Claude Code session changed across every repo it touched, from an AI 
 
 ## Install
 
-Copy `mods/session-changes` into `~/.config/herdr-app/mods/` (keep the folder name) and merge `keys.json` into your own:
+Tell your Herdr agent:
 
-```json
-{ "global": { "cmd-e": "mod.open:session-changes" } }
-```
+> Read ~/.config/herdr-app/AGENTS.md, then add this mod: https://github.com/iml885203/herdr-mods/tree/main/session-changes
 
-Then run `herdr-app check mods/session-changes`. Or tell your Herdr agent to add `herdr.dev/mods/iml885203/herdr-mods--session-changes`.
+By hand: copy `mods/session-changes` into `~/.config/herdr-app/mods/`, merge this folder's `keys.json` into your own, then run `herdr-app check mods/session-changes`.
 
 ## Keys
 
