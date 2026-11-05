@@ -17,7 +17,7 @@ Add-ons for the [Herdr](https://herdr.dev) desktop app.
 </tr>
 <tr>
 <td><a href="https://github.com/iml885203/orbit/tree/main/integrations/herdr-app"><img src="https://raw.githubusercontent.com/iml885203/orbit/main/integrations/herdr-app/preview.png" alt="Orbit"></a><br><b><a href="https://github.com/iml885203/orbit/tree/main/integrations/herdr-app">Orbit</a></b> <code>cmd-o</code><br>Your local Orbit environments: services, logs, traces. Lives in the Orbit repo.</td>
-<td><a href="attn-next/"><img src="attn-next/preview.png" alt="Attn next"></a><br><b><a href="attn-next/">Attn next</a></b> <code>cmd-shift-j</code><br>Jumps to the next agent that needs you: waiting for input first, then finished.</td>
+<td><a href="attn-next/"><img src="attn-next/preview.png" alt="Attn next"></a><br><b><a href="attn-next/">Attn next</a></b> <code>cmd-shift-j</code><br>Hold ⌘⇧, tap J: every agent, the ones that need you first. Let go to jump.</td>
 </tr>
 </table>
 

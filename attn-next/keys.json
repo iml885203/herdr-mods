@@ -1,5 +1,9 @@
 {
   "global": {
     "cmd-shift-j": "mod.open:attn-next"
+  },
+  "mod:attn-next": {
+    "cmd-shift-j": "attn-next.next",
+    "cmd-shift-k": "attn-next.prev"
   }
 }
