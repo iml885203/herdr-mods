@@ -3,7 +3,7 @@
 // rename popup that F2 opens, which renames the tab and types `/rename` into its Claude.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, run, hc, exec, home, appHome, props, closeOverlay, notify, theme, watchFolder } from "herdr";
+import { spaces, panes, focused, run, hc, exec, home, appHome, props, closeOverlay, notify, theme, watchFolder, fonts, settings } from "herdr";
 import * as fs from "fs/promises";
 import { APP, readSession, cleanName, claudeOf, renames, decide, probeResult, settled, PROBE_KEY, kebabName, parseCache, cacheGet, cachePut } from "./logic.js";
 
@@ -13,6 +13,13 @@ const PID_TTL_MS = 30000; // look again now and then: a crashed Claude can leave
 const MISS_MS = 2000; // a pane with no matching session is asked again at most this often
 const DRAFT = "Claude's prompt has unsent text";
 const SESSIONS = () => `${home()}/.claude/sessions`;
+
+// Nerd Font glyphs, drawn apart from the label text (as in Claude goal and Orbit).
+const ICONS = { tab: "\u{f02b}" }; // nf-fa-tag
+const SPINNER = Array.from({ length: 8 }, (_, i) => String.fromCodePoint(0xf0a9e + i)); // nf-md-circle_slice_1..8
+const NERD_FONT = "JetBrainsMono Nerd Font";
+const mono = () => (fonts().includes(NERD_FONT) ? NERD_FONT : settings().font_family ?? "JetBrains Mono");
+const glyph = (color, icon) => div().flex_none().font_family(mono()).text_color(color).child(icon);
 
 const localTabs = () => {
   const tabs = new Map();
@@ -265,7 +272,7 @@ export default class ClaudeTabName extends View {
       : "No Claude in this tab: the tab only.";
     return v_flex()
       .size_full()
-      .p(14)
+      .p(16)
       .gap(10)
       .bg(t.popover)
       .text_size(13)
@@ -275,12 +282,18 @@ export default class ClaudeTabName extends View {
         cx.stop_propagation();
         if (!this.applying) this.dismiss(); // mid-rename it finishes on its own, in a second
       })
-      .child(div().text_size(14).font_semibold().text_color(t.foreground).child("Rename tab"))
+      .child(h_flex().items_center().gap(8)
+        .child(glyph(t.accent, ICONS.tab).text_size(15))
+        .child(div().flex_none().text_size(15).font_semibold().text_color(t.foreground).child("Rename tab"))
+        .child(div().flex_1())
+        .child(div().min_w(0).truncate().text_size(10.5).text_color(this.missing ? t.blocked : t.dim).child(note)))
       .child(h_flex().h(34).flex_none().px(10).items_center().rounded(8).border_1().border_color(t.accent).bg(t.background)
         .child(Input.new(this.input).flex_1().h_full().text_size(13).text_color(t.foreground)))
       .child(h_flex().h(22).gap(8).items_center().text_size(11.5).text_color(t.dim)
         .child(div().flex_none().child("Suggested"))
-        .when(this.suggesting, (el) => el.child(div().italic().child("thinking…")))
+        .when(this.suggesting, (el) => el.child(h_flex().id("suggest-busy").gap(6).items_center()
+          .child(div().flex_none().font_family(mono()).text_color(t.accent).frames(SPINNER, 110))
+          .child(div().child("Thinking of a name…"))))
         .when(!this.suggesting && !this.suggestion, (el) => el.child(div().child(this.claude ? "none" : "only for a Claude tab")))
         .when(!!this.suggestion && this.suggestion === this.tab?.name, (el) => el.child(div().child(`${this.suggestion} (the tab's name already)`)))
         .when(!!this.suggestion && this.suggestion !== this.tab?.name, (el) => el.child(h_flex().id("suggestion").h(22).px(8).gap(6).items_center().rounded(6).cursor_pointer()
@@ -288,9 +301,11 @@ export default class ClaudeTabName extends View {
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click((_e, cx) => { this.useSuggestion(); cx.notify(); })
           .child(div().child(this.suggestion ?? ""))
-          .child(div().text_color(t.dim).child(this.used ? "in the field" : "tab")))))
-      .child(h_flex().gap(12).text_size(11.5).text_color(t.dim)
-        .child(div().flex_1().min_w(0).truncate().child(note))
-        .child(div().flex_none().child("↵ rename   esc cancel")));
+          .when(this.used, (el) => el.child(div().text_color(t.dim).child("in the field"))))))
+      .child(div().flex_1())
+      .child(h_flex().h(16).flex_none().gap(14).items_center().text_size(10.5).text_color(t.dim)
+        .child("↵ rename")
+        .when(!!this.suggestion && this.suggestion !== this.tab?.name && !this.used && !this.applying, (el) => el.child("⇥ use suggestion"))
+        .when(!this.applying, (el) => el.child("esc close")));
   }
 }
