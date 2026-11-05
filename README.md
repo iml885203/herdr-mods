@@ -12,8 +12,12 @@ Add-ons for the [Herdr](https://herdr.dev) desktop app.
 <td><a href="claude-goal/"><img src="claude-goal/preview.png" alt="Claude goal"></a><br><b><a href="claude-goal/">Claude goal</a></b> <code>cmd-shift-g</code><br>Write the next <code>/goal</code> for the Claude Code session in front of you.</td>
 </tr>
 <tr>
+<td><a href="claude-tab-name/"><img src="claude-tab-name/preview.png" alt="Claude tab name"></a><br><b><a href="claude-tab-name/">Claude tab name</a></b> <code>f2</code><br>A tab and its Claude Code session keep the same name: <code>/rename</code> renames the tab, <code>F2</code> renames both.</td>
 <td><a href="smart-close/"><img src="smart-close/preview.png" alt="Smart close"></a><br><b><a href="smart-close/">Smart close</a></b> <code>cmd-w</code><br>Closes the pane you're in; the tab goes only with its last pane.</td>
+</tr>
+<tr>
 <td><a href="https://github.com/iml885203/orbit/tree/main/integrations/herdr-app"><img src="https://raw.githubusercontent.com/iml885203/orbit/main/integrations/herdr-app/preview.png" alt="Orbit"></a><br><b><a href="https://github.com/iml885203/orbit/tree/main/integrations/herdr-app">Orbit</a></b> <code>cmd-o</code><br>Your local Orbit environments: services, logs, traces. Lives in the Orbit repo.</td>
+<td></td>
 </tr>
 </table>
 
