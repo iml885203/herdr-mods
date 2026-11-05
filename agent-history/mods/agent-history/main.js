@@ -4,7 +4,13 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
-import { spaces, panes, run, theme, shared, setShared, exec, home, appHome, props, closeOverlay, window } from "herdr";
+import { spaces, panes, run, theme, shared, setShared, exec, home, appHome, props, closeOverlay, window, fonts, settings } from "herdr";
+
+// Nerd Font glyphs, drawn apart from the label text (as in Claude goal and Claude tab name).
+const ICONS = { history: "\u{f1da}" }; // nf-fa-history
+const NERD_FONT = "JetBrainsMono Nerd Font";
+const mono = () => (fonts().includes(NERD_FONT) ? NERD_FONT : settings().font_family ?? "JetBrains Mono");
+const glyph = (color, icon) => div().flex_none().font_family(mono()).text_color(color).child(icon);
 
 const isMac = () => window()?.platform === "macos";
 
@@ -362,8 +368,9 @@ export default class SessionHistory extends View {
         cx.stop_propagation();
         cx.notify();
       })
-      .child(h_flex().items_center().gap(6)
-        .child(div().text_size(15).font_semibold().text_color(t.foreground).child("Agent History"))
+      .child(h_flex().items_center().gap(8)
+        .child(glyph(t.accent, ICONS.history).text_size(15))
+        .child(div().flex_none().text_size(15).font_semibold().text_color(t.foreground).child("Agent History"))
         .child(div().flex_1())
         .children(SCOPES.map((s) => div().id(`scope-${s.id}`).px(8).h(22).rounded(6).flex().items_center().cursor_pointer().text_size(11)
           .when(scope.id === s.id, (el) => el.bg(t.selected).text_color(t.foreground))
