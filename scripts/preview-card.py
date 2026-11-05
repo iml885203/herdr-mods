@@ -3,7 +3,7 @@
 # usage: uv run --with pillow scripts/preview-card.py <screenshot.png> <out.png> "<keys, e.g. ⌘ K>" \
 #          "<headline> " "<accented tail>" "#accent" [px to crop off the screenshot's top]
 # Accents in use: #5b8def kubernetes, #e8875f agent-history + claude-goal, #4cc38a session-changes,
-#                 #a48bfa smart-close, #2dd4bf orbit. Needs macOS (SF Pro fonts).
+#                 #a48bfa smart-close, #2dd4bf orbit, #f5a524 attn-next. Needs macOS (SF Pro fonts).
 import sys
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 W, H, PAD = 2400, 1500, 150
