@@ -1,6 +1,12 @@
 # Attn next
 
-Hold `cmd-shift`, tap `J`: every agent, the ones that need you first. Let go to jump.
+**Attn = attention.** One key takes you to the next agent that needs your attention: one waiting for your answer, or one that finished while you were looking elsewhere.
+
+With many agents running, you'd otherwise scan the sidebar to find who is stuck. Here:
+
+1. **Tap `⌘⇧J`**: you jump straight to the agent that needs you most. With nothing waiting, it goes to the next agent, like `⌘]`.
+2. **Hold `⌘⇧` and tap `J`**: a list of every agent opens, the ones that need you first. Tap `J` again (or `K`) to move, let go to jump.
+3. **`Esc`** closes the list without moving.
 
 ![Attn next](preview.png)
 

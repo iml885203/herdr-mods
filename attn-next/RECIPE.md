@@ -1,6 +1,6 @@
 # Attn next
 
-Hold `cmd-shift`, tap `J`: a popup lists every agent, the ones that need you first. Let go of cmd to jump.
+"Attn" is short for attention: jump to the next agent that needs yours. Tap `cmd-shift-j` to go straight to it; hold `cmd-shift` and tap `J` for a popup listing every agent, the ones that need you first, and let go of cmd to jump.
 
 ![Attn next](preview.png)
 
