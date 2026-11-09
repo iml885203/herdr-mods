@@ -57,4 +57,4 @@ The current selection has the theme's `selected` background; hovering a row uses
 - A quick tap (cmd released at once) still jumps.
 - `Esc` closes without changing focus; Enter and a click jump.
 - The accent bar sits on the agent you were on.
-- The pure logic in `pick.js` can be checked under Node: order with and without blocked/done agents, the initial selection rules, and wrap-around in `move()`. The source mod keeps this as `check-pick.mjs` outside the published folder.
+- The pure logic in `pick.js` can be checked under Node: order with and without blocked/done agents, the initial selection rules, and wrap-around in `move()`. These checks live in `test/pick.test.mjs` (run `node --test` from this folder).
